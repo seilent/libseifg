@@ -1,0 +1,50 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D prevLuma;
+layout(set = 0, binding = 1) uniform sampler2D currLuma;
+layout(set = 0, binding = 2, rg16f) uniform writeonly image2D flowOut;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.resolution.x) || coord.y >= int(pc.resolution.y)) return;
+
+    vec2 invRes = 1.0 / vec2(pc.resolution);
+    vec2 g = vec2(0.0);
+
+    float Sxx = 0.0, Syy = 0.0, Sxy = 0.0, Sxt = 0.0, Syt = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            vec2 q = vec2(coord) + vec2(dx, dy);
+            vec2 quv = (q + 0.5) * invRes;
+            float ix = (texture(currLuma, quv + vec2(invRes.x, 0.0)).r - texture(currLuma, quv - vec2(invRes.x, 0.0)).r) * 0.5;
+            float iy = (texture(currLuma, quv + vec2(0.0, invRes.y)).r - texture(currLuma, quv - vec2(0.0, invRes.y)).r) * 0.5;
+            float ic = texture(currLuma, quv).r;
+            float ip = texture(prevLuma, (q + g + 0.5) * invRes).r;
+            float it = ip - ic;
+            Sxx += ix * ix; Syy += iy * iy; Sxy += ix * iy;
+            Sxt += ix * it; Syt += iy * it;
+        }
+    }
+
+    float det = Sxx * Syy - Sxy * Sxy;
+    vec2 d = vec2(0.0);
+    if (det > 1e-5) {
+        d.x = (-Sxt * Syy + Syt * Sxy) / det;
+        d.y = (-Syt * Sxx + Sxt * Sxy) / det;
+    }
+    d = clamp(d, vec2(-8.0), vec2(8.0));
+
+    imageStore(flowOut, coord, vec4(g + d, 0.0, 0.0));
+}

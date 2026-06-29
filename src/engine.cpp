@@ -86,7 +86,7 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
 
     VkDescriptorType lumaTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType pyramidTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    VkDescriptorType blockTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType blockTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType blockTypesQcom[] = {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType refineTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType refineTypesQcom[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
@@ -101,8 +101,8 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
         if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_qcom_spv, shaders::seifg_block_match_coarse_qcom_spv_size, blockTypesQcom, 3)) return false;
         if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_qcom_spv, shaders::seifg_refine_level_qcom_spv_size, refineTypesQcom, 4)) return false;
     } else {
-        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_spv, shaders::seifg_block_match_coarse_spv_size, blockTypes, 3)) return false;
-        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_spv, shaders::seifg_refine_level_spv_size, refineTypes, 4)) return false;
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_lk_coarse_spv, shaders::seifg_lk_coarse_spv_size, blockTypes, 3)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_lk_refine_spv, shaders::seifg_lk_refine_spv_size, refineTypes, 4)) return false;
     }
     if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 3)) return false;
     if (!initPipeline(occlusionPipeline, dev, shaders::seifg_occlusion_spv, shaders::seifg_occlusion_spv_size, occTypes, 3)) return false;
@@ -125,8 +125,8 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
     for (uint32_t i = 0; i < PYRAMID_LEVELS; i++) {
         uint32_t lw = w >> i;
         uint32_t lh = h >> i;
-        if (!lumaPrev[i].createInternal(dev, phys, VK_FORMAT_R8_UNORM, lw, lh, lumaUsage)) return false;
-        if (!lumaCurr[i].createInternal(dev, phys, VK_FORMAT_R8_UNORM, lw, lh, lumaUsage)) return false;
+        if (!lumaPrev[i].createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, lw, lh, lumaUsage)) return false;
+        if (!lumaCurr[i].createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, lw, lh, lumaUsage)) return false;
     }
 
     uint32_t cw = w >> 4;
@@ -180,8 +180,8 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
         pool.updateBlockMatchImage(dev, dsBlockMatch, 0, lumaPrev[4].view, samplers.unnormalized, general);
         pool.updateBlockMatchImage(dev, dsBlockMatch, 1, lumaCurr[4].view, samplers.unnormalized, general);
     } else {
-        pool.updateStorageImage(dev, dsBlockMatch, 0, lumaPrev[4].view, general);
-        pool.updateStorageImage(dev, dsBlockMatch, 1, lumaCurr[4].view, general);
+        pool.updateCombinedImageSampler(dev, dsBlockMatch, 0, lumaPrev[4].view, samplers.bilinear, general);
+        pool.updateCombinedImageSampler(dev, dsBlockMatch, 1, lumaCurr[4].view, samplers.bilinear, general);
     }
     pool.updateStorageImage(dev, dsBlockMatch, 2, mvCoarse.view, general);
 
