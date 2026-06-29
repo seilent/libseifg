@@ -92,6 +92,53 @@ static void measure(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, 
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
+static void fillScene(AHardwareBuffer* ahb, int boxX, int boxW) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    for (uint32_t y = 0; y < d.height; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = 0; x < d.width; x++) {
+            uint8_t bg = pat((int)x, (int)y);
+            bool inBox = ((int)x >= boxX && (int)x < boxX + boxW);
+            uint8_t v = inBox ? (uint8_t)(255 - bg) : bg;
+            row[x*4+0] = v; row[x*4+1] = v; row[x*4+2] = v; row[x*4+3] = 255;
+        }
+    }
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void measureScene(AHardwareBuffer* ahb, int boxX, int boxW, int edge,
+                         uint32_t W, uint32_t H, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    const int m = 32;
+    double allE = 0.0; long allN = 0;
+    double edgeE = 0.0; long edgeN = 0; double edgeMax = 0.0;
+    const int le = boxX, re = boxX + boxW;
+    for (uint32_t y = m; y < H - m; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = m; x < W - m; x++) {
+            uint8_t bg = pat((int)x, (int)y);
+            bool inBox = ((int)x >= boxX && (int)x < boxX + boxW);
+            int expected = inBox ? (255 - bg) : bg;
+            double e = fabs((double)row[x*4] - expected);
+            allE += e; allN++;
+            int dl = (int)x - le; if (dl < 0) dl = -dl;
+            int dr = (int)x - re; if (dr < 0) dr = -dr;
+            if (dl <= edge || dr <= edge) { edgeE += e; edgeN++; if (e > edgeMax) edgeMax = e; }
+        }
+    }
+    printf("%s overall=%.1f  edgeBand=%.1f  edgeMax=%.0f\n",
+           label, allE / allN, edgeN ? edgeE / edgeN : 0.0, edgeMax);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
 int main(int argc, char** argv) {
     const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
@@ -129,6 +176,21 @@ int main(int argc, char** argv) {
     seifg::presentContext(ctx, -1, {});
     seifg::waitIdle();
     measure(outs[0], 0, W, H, "static");
+
+    const int BOXW = 200;
+    const int BX0 = (int)W / 2 - BOXW / 2 - SHIFT;
+    const int BX1 = BX0 + 2 * SHIFT;
+    fillScene(in0, BX0, BOXW);
+    fillScene(in1, BX1, BOXW);
+    seifg::presentContext(ctx, -1, {});
+    seifg::waitIdle();
+    printf("-- occlusion: box %dpx wide moving +%dpx over static bg --\n", BOXW, 2 * SHIFT);
+    for (int i = 0; i < N; i++) {
+        int boxXt = (int)lround(BX0 + (double)(BX1 - BX0) * (i + 1) / (double)M);
+        char label[80];
+        snprintf(label, sizeof(label), "  t=%d/%d", i + 1, M);
+        measureScene(outs[i], boxXt, BOXW, 12, W, H, label);
+    }
 
     fillShifted(in0, 0);
     fillShifted(in1, 2 * SHIFT);
