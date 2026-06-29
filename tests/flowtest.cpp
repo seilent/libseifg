@@ -32,12 +32,19 @@ static float vnoise(float x, float y) {
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
 }
 
-static uint8_t pat(int x, int y) {
-    float v = 0.5f * vnoise(x * 0.05f, y * 0.05f)
-            + 0.3f * vnoise(x * 0.12f, y * 0.12f)
-            + 0.2f * vnoise(x * 0.25f, y * 0.25f);
+static float patf(float x, float y) {
+    return 0.5f * vnoise(x * 0.05f, y * 0.05f)
+         + 0.3f * vnoise(x * 0.12f, y * 0.12f)
+         + 0.2f * vnoise(x * 0.25f, y * 0.25f);
+}
+
+static uint8_t toByte(float v) {
     int iv = (int)(v * 255.0f);
     return (uint8_t)(iv < 0 ? 0 : (iv > 255 ? 255 : iv));
+}
+
+static uint8_t pat(int x, int y) {
+    return toByte(patf((float)x, (float)y));
 }
 
 static void fillShifted(AHardwareBuffer* ahb, int shiftX) {
@@ -200,6 +207,104 @@ static void measureGrid(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
+static void affineSrc(float px, float py, float s, float a, float tx, float ty,
+                      float cx, float cy, float& sx, float& sy) {
+    float dx = px - tx - cx;
+    float dy = py - ty - cy;
+    float ca = cosf(a), sn = sinf(a);
+    sx = cx + (ca * dx + sn * dy) / s;
+    sy = cy + (-sn * dx + ca * dy) / s;
+}
+
+static void fillAffine(AHardwareBuffer* ahb, float s, float a, float tx, float ty) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    float cx = d.width * 0.5f, cy = d.height * 0.5f;
+    for (uint32_t y = 0; y < d.height; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = 0; x < d.width; x++) {
+            float sx, sy;
+            affineSrc((float)x, (float)y, s, a, tx, ty, cx, cy, sx, sy);
+            uint8_t v = toByte(patf(sx, sy));
+            row[x*4+0] = v; row[x*4+1] = v; row[x*4+2] = v; row[x*4+3] = 255;
+        }
+    }
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void measureAffine(AHardwareBuffer* ahb, float s, float a, float tx, float ty,
+                          uint32_t W, uint32_t H, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    float cx = W * 0.5f, cy = H * 0.5f;
+    const int B = 16, m = 32;
+    double gErr = 0.0; long gN = 0; double gMax = 0.0;
+    std::vector<double> blockErr;
+    for (uint32_t by = m; by + B < H - m; by += B) {
+        for (uint32_t bx = m; bx + B < W - m; bx += B) {
+            double be = 0.0; int bn = 0;
+            for (int yy = 0; yy < B; yy++) {
+                uint8_t* row = base + (size_t)(by + yy) * d.stride * 4;
+                for (int xx = 0; xx < B; xx++) {
+                    float sx, sy;
+                    affineSrc((float)(bx + xx), (float)(by + yy), s, a, tx, ty, cx, cy, sx, sy);
+                    int ref = toByte(patf(sx, sy));
+                    double e = fabs((double)row[(bx + xx) * 4] - ref);
+                    be += e; bn++; gErr += e; gN++; if (e > gMax) gMax = e;
+                }
+            }
+            blockErr.push_back(be / bn);
+        }
+    }
+    double mean = gErr / gN, bmean = 0.0;
+    for (double e : blockErr) bmean += e; bmean /= blockErr.size();
+    double bvar = 0.0; for (double e : blockErr) bvar += (e - bmean) * (e - bmean);
+    printf("%s meanErr=%.1f  blockStdErr=%.1f  maxErr=%.0f\n", label, mean, sqrt(bvar / blockErr.size()), gMax);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void fillFade(AHardwareBuffer* ahb, float bright) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    for (uint32_t y = 0; y < d.height; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = 0; x < d.width; x++) {
+            uint8_t v = toByte(patf((float)x, (float)y) * bright);
+            row[x*4+0] = v; row[x*4+1] = v; row[x*4+2] = v; row[x*4+3] = 255;
+        }
+    }
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void measureFade(AHardwareBuffer* ahb, float bright, uint32_t W, uint32_t H, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    const int m = 32;
+    double e = 0.0; long n = 0; double mx = 0.0;
+    for (uint32_t y = m; y < H - m; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = m; x < W - m; x++) {
+            int ref = toByte(patf((float)x, (float)y) * bright);
+            double er = fabs((double)row[x*4] - ref);
+            e += er; n++; if (er > mx) mx = er;
+        }
+    }
+    printf("%s meanErr=%.1f  maxErr=%.0f\n", label, e / n, mx);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
 int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
@@ -262,6 +367,51 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
         char label[80];
         snprintf(label, sizeof(label), "  t=%d/%d +%dpx", i + 1, M, gShift);
         measureGrid(outs[i], gShift, W, H, label);
+    }
+
+    {
+        float TX = 2.0f * SHIFT, TY = (float)SHIFT;
+        fillAffine(in0, 1.0f, 0.0f, 0.0f, 0.0f);
+        fillAffine(in1, 1.0f, 0.0f, TX, TY);
+        seifg::presentContext(ctx, -1, {}); seifg::waitIdle();
+        printf("-- diagonal pan (+%.0f,+%.0f px) --\n", TX, TY);
+        for (int i = 0; i < N; i++) {
+            float ti = (float)(i + 1) / (float)M;
+            char l[48]; snprintf(l, sizeof(l), "  t=%d/%d", i + 1, M);
+            measureAffine(outs[i], 1.0f, 0.0f, TX * ti, TY * ti, W, H, l);
+        }
+
+        float S = 1.0f + 0.01f * SHIFT;
+        fillAffine(in0, 1.0f, 0.0f, 0.0f, 0.0f);
+        fillAffine(in1, S, 0.0f, 0.0f, 0.0f);
+        seifg::presentContext(ctx, -1, {}); seifg::waitIdle();
+        printf("-- zoom (scale %.3f) --\n", S);
+        for (int i = 0; i < N; i++) {
+            float ti = (float)(i + 1) / (float)M;
+            char l[48]; snprintf(l, sizeof(l), "  t=%d/%d", i + 1, M);
+            measureAffine(outs[i], 1.0f + (S - 1.0f) * ti, 0.0f, 0.0f, 0.0f, W, H, l);
+        }
+
+        float ANG = 0.004f * SHIFT;
+        fillAffine(in0, 1.0f, 0.0f, 0.0f, 0.0f);
+        fillAffine(in1, 1.0f, ANG, 0.0f, 0.0f);
+        seifg::presentContext(ctx, -1, {}); seifg::waitIdle();
+        printf("-- rotation (%.1f deg) --\n", ANG * 57.2958f);
+        for (int i = 0; i < N; i++) {
+            float ti = (float)(i + 1) / (float)M;
+            char l[48]; snprintf(l, sizeof(l), "  t=%d/%d", i + 1, M);
+            measureAffine(outs[i], 1.0f, ANG * ti, 0.0f, 0.0f, W, H, l);
+        }
+
+        fillFade(in0, 1.0f);
+        fillFade(in1, 0.5f);
+        seifg::presentContext(ctx, -1, {}); seifg::waitIdle();
+        printf("-- brightness fade (1.0 -> 0.5, no motion) --\n");
+        for (int i = 0; i < N; i++) {
+            float ti = (float)(i + 1) / (float)M;
+            char l[48]; snprintf(l, sizeof(l), "  t=%d/%d", i + 1, M);
+            measureFade(outs[i], 1.0f - 0.5f * ti, W, H, l);
+        }
     }
 
     fillShifted(in0, 0);
