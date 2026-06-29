@@ -11,11 +11,11 @@ static std::vector<Image> g_outN;
 static int32_t g_ctxId = 0;
 
 void initialize(uint64_t deviceUUID,
-    bool, float flowScale, uint64_t,
+    bool, uint32_t quality, uint64_t,
     const std::function<std::vector<uint8_t>(const std::string&)>&) {
     if (g_engine) return;
     g_engine = new Engine();
-    if (!g_engine->init(deviceUUID, flowScale)) {
+    if (!g_engine->init(deviceUUID, quality)) {
         delete g_engine;
         g_engine = nullptr;
     }

@@ -48,11 +48,10 @@ struct Engine {
 
     uint32_t width = 0;
     uint32_t height = 0;
-    float flowScale = 0.5f;
     int quality = 2;
     bool useQcom = false;
 
-    bool init(uint64_t deviceUUID, float flowScale);
+    bool init(uint64_t deviceUUID, uint32_t quality);
     void destroy();
     bool createResources(uint32_t w, uint32_t h);
     void destroyResources();

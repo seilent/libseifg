@@ -13,7 +13,7 @@ struct AHardwareBuffer;
 namespace seifg {
 
 void initialize(uint64_t deviceUUID,
-    bool isHdr, float flowScale, uint64_t generationCount,
+    bool isHdr, uint32_t quality, uint64_t generationCount,
     const std::function<std::vector<uint8_t>(const std::string&)>& loader);
 
 #ifdef __ANDROID__

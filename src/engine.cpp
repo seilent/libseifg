@@ -75,9 +75,8 @@ static bool initPipeline(Pipeline& p, VkDevice dev, const uint8_t* spv, size_t s
     return p.init(dev, reinterpret_cast<const uint32_t*>(spv), static_cast<uint32_t>(size), types, count, spec);
 }
 
-bool Engine::init(uint64_t deviceUUID, float fs) {
-    flowScale = fs;
-    quality = (int)(fs * 4.0f + 0.5f);
+bool Engine::init(uint64_t deviceUUID, uint32_t q) {
+    quality = (int)q;
     if (quality < 0) quality = 0;
     if (quality > 4) quality = 4;
     const int32_t radius = (quality <= 1) ? 2 : (quality == 2 ? 3 : 4);
@@ -268,7 +267,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     SeifgPushConstants pc{};
     pc.width = width;
     pc.height = height;
-    pc.flowScale = flowScale;
+    pc.flowScale = 0.0f;
     pc.threshold = 4.0f;
     pc.temperature = 5.0f;
 

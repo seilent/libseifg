@@ -323,7 +323,7 @@ static void measureFade(AHardwareBuffer* ahb, float bright, uint32_t W, uint32_t
 int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
-    const float flowScale = (argc > 3) ? (float)atof(argv[3]) : 0.5f;
+    const uint32_t quality = (argc > 3) ? (uint32_t)atoi(argv[3]) : 2;
     const int N = M - 1;
     if (M < 2 || N > 3) { printf("FAIL: multiplier must be 2..4\n"); return 1; }
 
@@ -336,9 +336,9 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
 
     fillShifted(in0, 0);
     fillShifted(in1, 2 * SHIFT);
-    printf("=== multiplier %dx, flowScale %.2f, pan +%dpx ===\n", M, flowScale, 2 * SHIFT);
+    printf("=== multiplier %dx, quality %u, pan +%dpx ===\n", M, quality, 2 * SHIFT);
 
-    seifg::initialize(0, false, flowScale, (uint64_t)M, {});
+    seifg::initialize(0, false, quality, (uint64_t)M, {});
     int32_t ctx = seifg::createContextFromAHB(in0, in1, outs, VkExtent2D{W, H},
                                               VK_FORMAT_R8G8B8A8_UNORM);
     if (ctx < 0) { printf("FAIL: createContext=%d\n", ctx); return 1; }
