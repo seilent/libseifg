@@ -165,7 +165,10 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
     for (uint32_t i = 0; i < 2; i++) {
         if (!pool.allocate(dev, warpPipeline.descriptorSetLayout, &dsWarp[i])) return false;
     }
-    if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend)) return false;
+    if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend[0])) return false;
+    for (uint32_t i = 1; i < MAX_OUTPUTS; i++) {
+        if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend[i])) return false;
+    }
 
     for (uint32_t i = 0; i < 4; i++) {
         uint32_t src = i;
@@ -209,14 +212,18 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
     pool.updateStorageImage(dev, dsOcclusion, 1, mvBackward.view, general);
     pool.updateStorageImage(dev, dsOcclusion, 2, confidence.view, general);
 
-    pool.updateStorageImage(dev, dsBlend, 0, warpedForward.view, general);
-    pool.updateStorageImage(dev, dsBlend, 1, warpedBackward.view, general);
-    pool.updateStorageImage(dev, dsBlend, 2, confidence.view, general);
+    for (uint32_t i = 0; i < MAX_OUTPUTS; i++) {
+        pool.updateStorageImage(dev, dsBlend[i], 0, warpedForward.view, general);
+        pool.updateStorageImage(dev, dsBlend[i], 1, warpedBackward.view, general);
+        pool.updateStorageImage(dev, dsBlend[i], 2, confidence.view, general);
+    }
 
     return true;
 }
 
-bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
+bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut) {
+    if (numOut == 0) return false;
+    if (numOut > MAX_OUTPUTS) numOut = MAX_OUTPUTS;
     VkDevice dev = device.device;
     VkCommandBuffer cmd = commands.acquire(dev);
     VkImageLayout general = VK_IMAGE_LAYOUT_GENERAL;
@@ -224,7 +231,8 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
 
     externalAcquire(cmd, in0.image, qf);
     externalAcquire(cmd, in1.image, qf);
-    externalAcquire(cmd, out.image, qf);
+    for (uint32_t i = 0; i < numOut; i++)
+        externalAcquire(cmd, outs[i].image, qf);
 
     descriptorPool.updateCombinedImageSampler(dev, dsLumaConvert[0], 0, in0.view, samplers.nearest, general);
     descriptorPool.updateStorageImage(dev, dsLumaConvert[0], 1, lumaPrev[0].view, general);
@@ -238,15 +246,16 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     descriptorPool.updateStorageImage(dev, dsWarp[1], 1, mvBackward.view, general);
     descriptorPool.updateStorageImage(dev, dsWarp[1], 2, warpedBackward.view, general);
 
-    descriptorPool.updateCombinedImageSampler(dev, dsBlend, 3, in0.view, samplers.bilinear, general);
-    descriptorPool.updateCombinedImageSampler(dev, dsBlend, 4, in1.view, samplers.bilinear, general);
-    descriptorPool.updateStorageImage(dev, dsBlend, 5, out.view, general);
+    for (uint32_t i = 0; i < numOut; i++) {
+        descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 3, in0.view, samplers.bilinear, general);
+        descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 4, in1.view, samplers.bilinear, general);
+        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, outs[i].view, general);
+    }
 
     SeifgPushConstants pc{};
     pc.width = width;
     pc.height = height;
     pc.flowScale = flowScale;
-    pc.t = t;
     pc.threshold = 4.0f;
     pc.temperature = 5.0f;
 
@@ -302,20 +311,23 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     dispatch(occlusionPipeline, dsOcclusion, width, height);
     barrier(cmd, confidence.image);
 
-    dispatch(warpPipeline, dsWarp[0], width, height);
-    pc.t = 1.0f - t;
-    dispatch(warpPipeline, dsWarp[1], width, height);
-    pc.t = t;
-
     VkImage warpOut[] = {warpedForward.image, warpedBackward.image};
-    barrierMulti(cmd, warpOut, 2);
-
-    dispatch(blendPipeline, dsBlend, width, height);
-    barrier(cmd, out.image);
+    for (uint32_t i = 0; i < numOut; i++) {
+        float ti = (float)(i + 1) / (float)(numOut + 1);
+        pc.t = ti;
+        dispatch(warpPipeline, dsWarp[0], width, height);
+        pc.t = 1.0f - ti;
+        dispatch(warpPipeline, dsWarp[1], width, height);
+        pc.t = ti;
+        barrierMulti(cmd, warpOut, 2);
+        dispatch(blendPipeline, dsBlend[i], width, height);
+        barrier(cmd, outs[i].image);
+    }
 
     externalRelease(cmd, in0.image, qf);
     externalRelease(cmd, in1.image, qf);
-    externalRelease(cmd, out.image, qf);
+    for (uint32_t i = 0; i < numOut; i++)
+        externalRelease(cmd, outs[i].image, qf);
 
     return commands.submit(dev, device.computeQueue);
 }

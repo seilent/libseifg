@@ -10,6 +10,7 @@
 namespace seifg {
 
 static constexpr uint32_t PYRAMID_LEVELS = 5;
+static constexpr uint32_t MAX_OUTPUTS = 3;
 
 struct Engine {
     Device device;
@@ -43,7 +44,7 @@ struct Engine {
     VkDescriptorSet dsFlowFilter{};
     VkDescriptorSet dsOcclusion{};
     VkDescriptorSet dsWarp[2]{};
-    VkDescriptorSet dsBlend{};
+    VkDescriptorSet dsBlend[MAX_OUTPUTS]{};
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -54,7 +55,7 @@ struct Engine {
     void destroy();
     bool createResources(uint32_t w, uint32_t h);
     void destroyResources();
-    bool recordAndSubmit(Image& in0, Image& in1, Image& out, float t);
+    bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut);
 };
 
 }

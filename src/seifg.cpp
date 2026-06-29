@@ -49,7 +49,7 @@ int32_t createContextFromAHB(
 
 void presentContext(int32_t, int, const std::vector<int>&) {
     if (!g_engine || g_outN.empty()) return;
-    g_engine->recordAndSubmit(g_in0, g_in1, g_outN[0], 0.5f);
+    g_engine->recordAndSubmit(g_in0, g_in1, g_outN.data(), static_cast<uint32_t>(g_outN.size()));
 }
 
 void deleteContext(int32_t) {

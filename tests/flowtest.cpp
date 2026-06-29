@@ -94,45 +94,57 @@ static void measure(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, 
 
 int main(int argc, char** argv) {
     const uint32_t W = 1280, H = 720;
-    const int SHIFT = (argc > 1) ? atoi(argv[1]) : 10;
+    const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
+    const int M = (argc > 2) ? atoi(argv[2]) : 2;
+    const float flowScale = (argc > 3) ? (float)atof(argv[3]) : 0.5f;
+    const int N = M - 1;
+    if (M < 2 || N > 3) { printf("FAIL: multiplier must be 2..4\n"); return 1; }
+
     AHardwareBuffer* in0 = allocAhb(W, H);
     AHardwareBuffer* in1 = allocAhb(W, H);
-    AHardwareBuffer* out = allocAhb(W, H);
-    if (!in0 || !in1 || !out) { printf("FAIL: ahb alloc\n"); return 1; }
+    std::vector<AHardwareBuffer*> outs(N);
+    for (int i = 0; i < N; i++) outs[i] = allocAhb(W, H);
+    if (!in0 || !in1) { printf("FAIL: ahb alloc\n"); return 1; }
+    for (auto* o : outs) if (!o) { printf("FAIL: out alloc\n"); return 1; }
 
     fillShifted(in0, 0);
     fillShifted(in1, 2 * SHIFT);
-    printf("uniform pan +%dpx, ideal interp +%dpx\n", 2 * SHIFT, SHIFT);
+    printf("=== multiplier %dx, flowScale %.2f, pan +%dpx ===\n", M, flowScale, 2 * SHIFT);
 
-    seifg::initialize(0, false, 0.5f, 1, {});
-    int32_t ctx = seifg::createContextFromAHB(in0, in1, {out}, VkExtent2D{W, H},
+    seifg::initialize(0, false, flowScale, (uint64_t)M, {});
+    int32_t ctx = seifg::createContextFromAHB(in0, in1, outs, VkExtent2D{W, H},
                                               VK_FORMAT_R8G8B8A8_UNORM);
     if (ctx < 0) { printf("FAIL: createContext=%d\n", ctx); return 1; }
     seifg::presentContext(ctx, -1, {});
     seifg::waitIdle();
-    measure(out, SHIFT, W, H, "pan ");
+    for (int i = 0; i < N; i++) {
+        int ideal = (int)lround(2.0 * SHIFT * (i + 1) / (double)M);
+        char label[64];
+        snprintf(label, sizeof(label), "t=%d/%d ideal+%dpx", i + 1, M, ideal);
+        measure(outs[i], ideal, W, H, label);
+    }
 
     fillShifted(in0, 0);
     fillShifted(in1, 0);
     seifg::presentContext(ctx, -1, {});
     seifg::waitIdle();
-    measure(out, 0, W, H, "static");
+    measure(outs[0], 0, W, H, "static");
 
     fillShifted(in0, 0);
     fillShifted(in1, 2 * SHIFT);
-    const int N = 120;
+    const int FRAMES = 120;
     struct timespec t0{}, t1{};
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (int i = 0; i < N; i++) { seifg::presentContext(ctx, -1, {}); seifg::waitIdle(); }
+    for (int i = 0; i < FRAMES; i++) { seifg::presentContext(ctx, -1, {}); seifg::waitIdle(); }
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    double ms = ((t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / N;
-    printf("seifg: %.2f ms/frame at %ux%u\n", ms, W, H);
+    double ms = ((t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / FRAMES;
+    printf("seifg %dx: %.2f ms/frame at %ux%u (%d interp%s)\n", M, ms, W, H, N, N > 1 ? "s" : "");
 
     seifg::deleteContext(ctx);
     seifg::finalize();
     AHardwareBuffer_release(in0);
     AHardwareBuffer_release(in1);
-    AHardwareBuffer_release(out);
+    for (auto* o : outs) AHardwareBuffer_release(o);
     printf("DONE\n");
     return 0;
 }
