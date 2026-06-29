@@ -92,9 +92,9 @@ static void measure(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, 
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
-int main() {
+int main(int argc, char** argv) {
     const uint32_t W = 1280, H = 720;
-    const int SHIFT = 10;
+    const int SHIFT = (argc > 1) ? atoi(argv[1]) : 10;
     AHardwareBuffer* in0 = allocAhb(W, H);
     AHardwareBuffer* in1 = allocAhb(W, H);
     AHardwareBuffer* out = allocAhb(W, H);
