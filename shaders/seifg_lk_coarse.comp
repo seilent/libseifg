@@ -21,25 +21,7 @@ void main() {
     if (coord.x >= int(pc.resolution.x) || coord.y >= int(pc.resolution.y)) return;
 
     vec2 invRes = 1.0 / vec2(pc.resolution);
-
     vec2 g = vec2(0.0);
-    float bestCost = 1e30;
-    for (int sy = -4; sy <= 4; sy++) {
-        for (int sx = -4; sx <= 4; sx++) {
-            vec2 cand = vec2(float(sx), float(sy));
-            float cost = 0.0;
-            for (int dy = -2; dy <= 2; dy++) {
-                for (int dx = -2; dx <= 2; dx++) {
-                    vec2 q = vec2(coord) + vec2(dx, dy);
-                    vec2 quv = (q + 0.5) * invRes;
-                    float c = texture(currLuma, quv).r;
-                    float p = texture(prevLuma, (q + cand + 0.5) * invRes).r;
-                    cost += abs(p - c);
-                }
-            }
-            if (cost < bestCost) { bestCost = cost; g = cand; }
-        }
-    }
 
     float Sxx = 0.0, Syy = 0.0, Sxy = 0.0, Sxt = 0.0, Syt = 0.0;
     for (int dy = -3; dy <= 3; dy++) {
@@ -63,7 +45,7 @@ void main() {
         d.x = (-Sxt * Syy + Syt * Sxy) / det;
         d.y = (-Syt * Sxx + Sxt * Sxy) / det;
     }
-    d = clamp(d, vec2(-2.0), vec2(2.0));
+    d = clamp(d, vec2(-8.0), vec2(8.0));
 
     imageStore(flowOut, coord, vec4(g + d, 0.0, 0.0));
 }
