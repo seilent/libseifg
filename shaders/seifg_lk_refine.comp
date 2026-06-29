@@ -25,6 +25,11 @@ void main() {
     vec2 uv = (vec2(coord) + 0.5) * invRes;
     vec2 g = texture(coarserFlow, uv).rg * 2.0;
 
+    if (pc.level == 0) {
+        imageStore(flowOut, coord, vec4(g, 0.0, 0.0));
+        return;
+    }
+
     for (int iter = 0; iter < 2; iter++) {
         float Sxx = 0.0, Syy = 0.0, Sxy = 0.0, Sxt = 0.0, Syt = 0.0;
         for (int dy = -3; dy <= 3; dy++) {
