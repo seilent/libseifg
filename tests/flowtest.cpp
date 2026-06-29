@@ -91,11 +91,26 @@ static void measure(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, 
     }
     double mean = globalErr / gN;
     double bmean = 0.0; for (double e : blockErr) bmean += e; bmean /= blockErr.size();
-    double bvar = 0.0, bmax = 0.0;
-    for (double e : blockErr) { bvar += (e - bmean) * (e - bmean); if (e > bmax) bmax = e; }
+    double bvar = 0.0;
+    for (double e : blockErr) bvar += (e - bmean) * (e - bmean);
     double bstd = sqrt(bvar / blockErr.size());
-    printf("%s: meanErr=%.1f  blockStdErr=%.1f  blockMaxErr=%.1f  (blockStd=blockiness)\n",
-           label, mean, bstd, bmax);
+
+    double lapEx = 0.0; long lapN = 0;
+    for (uint32_t y = m + 1; y + m + 1 < H; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        uint8_t* up = base + (size_t)(y - 1) * d.stride * 4;
+        uint8_t* dn = base + (size_t)(y + 1) * d.stride * 4;
+        for (uint32_t x = m + 1; x + m + 1 < W; x++) {
+            double lapO = fabs(4.0 * row[x*4] - row[(x-1)*4] - row[(x+1)*4] - up[x*4] - dn[x*4]);
+            int rx = (int)x - refShift, ry = (int)y;
+            double lapR = fabs(4.0 * pat(rx, ry) - pat(rx-1, ry) - pat(rx+1, ry) - pat(rx, ry-1) - pat(rx, ry+1));
+            double ex = lapO - lapR; if (ex > 0.0) { lapEx += ex; }
+            lapN++;
+        }
+    }
+    double discont = lapN ? lapEx / lapN : 0.0;
+    printf("%s: meanErr=%.1f  blockStd=%.1f  discontinuity=%.2f  (discontinuity=spurious edges)\n",
+           label, mean, bstd, discont);
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 

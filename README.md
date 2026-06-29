@@ -78,9 +78,13 @@ frame). `presentContext` runs the pipeline and fills every output buffer.
 
 ## Testing
 
-`tests/flowtest` runs synthetic motion patterns on-device and reports per-frame error,
-blockiness, and timing. Patterns cover horizontal and diagonal panning, zoom, rotation,
-occlusion edges, a periodic grid/fence, and a brightness fade:
+`tests/flowtest` runs synthetic motion patterns on-device and reports per-frame accuracy,
+structural smoothness, and timing. The headline metric is **discontinuity** (spurious edge
+energy in the output that is not present in the source): it measures the blocky, flickering
+artifacts that matter visually, independent of raw per-pixel accuracy — a smoothly-wrong warp
+scores low, while block-quantized flow scores high even when its average error is small.
+Patterns cover horizontal and diagonal panning, zoom, rotation, occlusion edges, a periodic
+grid/fence, and a brightness fade:
 
 ```sh
 adb push build/seifg_flowtest /data/local/tmp/
