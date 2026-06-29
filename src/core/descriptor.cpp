@@ -6,12 +6,13 @@ bool DescriptorPool::init(VkDevice device) {
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 48},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 24},
+        {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, 24},
     };
 
     VkDescriptorPoolCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.maxSets = 24;
-    ci.poolSizeCount = 2;
+    ci.poolSizeCount = 3;
     ci.pPoolSizes = sizes;
 
     lastResult = vkCreateDescriptorPool(device, &ci, nullptr, &pool);
@@ -59,6 +60,24 @@ void DescriptorPool::updateCombinedImageSampler(VkDevice device, VkDescriptorSet
     write.dstBinding = binding;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imgInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void DescriptorPool::updateBlockMatchImage(VkDevice device, VkDescriptorSet set, uint32_t binding,
+                                           VkImageView view, VkSampler sampler, VkImageLayout layout) {
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler = sampler;
+    imgInfo.imageView = view;
+    imgInfo.imageLayout = layout;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM;
     write.pImageInfo = &imgInfo;
 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);

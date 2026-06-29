@@ -9,7 +9,7 @@ bool Device::init(uint64_t deviceUUID) {
 
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.apiVersion = VK_API_VERSION_1_1;
+    appInfo.apiVersion = VK_API_VERSION_1_3;
 
     VkInstanceCreateInfo instanceCI{};
     instanceCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -74,7 +74,7 @@ bool Device::init(uint64_t deviceUUID) {
     };
     uint32_t extCount = 8;
 
-    const char* allExts[12];
+    const char* allExts[16];
     memcpy(allExts, requiredExts, sizeof(requiredExts));
 
     uint32_t availExtCount = 0;
@@ -87,12 +87,42 @@ bool Device::init(uint64_t deviceUUID) {
             allExts[extCount++] = VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME;
         else if (strcmp(availExts[i].extensionName, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0)
             allExts[extCount++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+        else if (strcmp(availExts[i].extensionName, "VK_QCOM_image_processing") == 0)
+            hasImageProcessing = true;
     }
     delete[] availExts;
+
+    if (hasImageProcessing) {
+        auto supportsBlockMatch = [&](VkFormat fmt) {
+            VkFormatProperties3 p3{};
+            p3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+            VkFormatProperties2 p2{};
+            p2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+            p2.pNext = &p3;
+            vkGetPhysicalDeviceFormatProperties2(physicalDevice, fmt, &p2);
+            return (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_BLOCK_MATCHING_BIT_QCOM) != 0;
+        };
+        if (supportsBlockMatch(VK_FORMAT_R16_SFLOAT)) {
+            lumaFormat = VK_FORMAT_R16_SFLOAT;
+        } else if (supportsBlockMatch(VK_FORMAT_R8_UNORM)) {
+            lumaFormat = VK_FORMAT_R8_UNORM;
+        } else {
+            hasImageProcessing = false;
+        }
+    }
+    if (hasImageProcessing) {
+        allExts[extCount++] = "VK_QCOM_image_processing";
+    }
 
     VkPhysicalDeviceShaderFloat16Int8Features fp16Features{};
     fp16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
     fp16Features.shaderFloat16 = VK_TRUE;
+
+    VkPhysicalDeviceImageProcessingFeaturesQCOM ipFeatures{};
+    ipFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_FEATURES_QCOM;
+    ipFeatures.textureBlockMatch = VK_TRUE;
+    if (hasImageProcessing)
+        fp16Features.pNext = &ipFeatures;
 
     VkDeviceCreateInfo deviceCI{};
     deviceCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

@@ -1,0 +1,65 @@
+#version 450
+#extension GL_QCOM_image_processing : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D prevLuma4;
+layout(set = 0, binding = 1) uniform sampler2D currLuma4;
+layout(set = 0, binding = 2, rg16f) uniform writeonly image2D mvCoarse;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+const uvec2 BLK = uvec2(4, 4);
+
+float sad(ivec2 tcenter, ivec2 rcenter) {
+    ivec2 h = ivec2(BLK) / 2;
+    ivec2 maxc = ivec2(pc.resolution) - ivec2(BLK);
+    ivec2 t = clamp(tcenter - h, ivec2(0), maxc);
+    ivec2 r = clamp(rcenter - h, ivec2(0), maxc);
+    return textureBlockMatchSADQCOM(currLuma4, uvec2(t), prevLuma4, uvec2(r), BLK).x;
+}
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
+
+    ivec2 center = ivec2(coord);
+    int radius = int(12.0 * pc.flowScale);
+    int step = max(radius / 2, 1);
+
+    ivec2 bestOff = ivec2(0);
+    float bestSad = sad(center, center);
+
+    for (int iter = 0; iter < 3; iter++) {
+        ivec2 candidates[8];
+        candidates[0] = bestOff + ivec2(step, 0);
+        candidates[1] = bestOff + ivec2(-step, 0);
+        candidates[2] = bestOff + ivec2(0, step);
+        candidates[3] = bestOff + ivec2(0, -step);
+        int hs = max(step / 2, 1);
+        candidates[4] = bestOff + ivec2(hs, hs);
+        candidates[5] = bestOff + ivec2(-hs, hs);
+        candidates[6] = bestOff + ivec2(hs, -hs);
+        candidates[7] = bestOff + ivec2(-hs, -hs);
+
+        for (int i = 0; i < 8; i++) {
+            if (abs(candidates[i].x) > radius || abs(candidates[i].y) > radius) continue;
+            float s = sad(center, center + candidates[i]);
+            if (s < bestSad) {
+                bestSad = s;
+                bestOff = candidates[i];
+            }
+        }
+        step = max(step / 2, 1);
+    }
+
+    imageStore(mvCoarse, ivec2(coord), vec4(vec2(bestOff), 0.0, 0.0));
+}

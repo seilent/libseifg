@@ -27,7 +27,6 @@ void main() {
 
     float error = length(fwd + bwd);
     float conf = clamp(1.0 - error / pc.threshold, 0.0, 1.0);
-    conf *= exp(-length(fwd) * 0.05);
 
     imageStore(confidence, p, vec4(conf));
 }

@@ -15,6 +15,8 @@ struct DescriptorPool {
                             VkImageView view, VkImageLayout layout);
     void updateCombinedImageSampler(VkDevice device, VkDescriptorSet set, uint32_t binding,
                                      VkImageView view, VkSampler sampler, VkImageLayout layout);
+    void updateBlockMatchImage(VkDevice device, VkDescriptorSet set, uint32_t binding,
+                               VkImageView view, VkSampler sampler, VkImageLayout layout);
     void destroy(VkDevice device);
 };
 

@@ -24,25 +24,17 @@ void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(pc.resolution.x) || p.y >= int(pc.resolution.y)) return;
 
-    float confFwd = imageLoad(confidence, p).r;
-    float confBwd = confFwd;
-
-    float wFwd = exp(confFwd * pc.temperature);
-    float wBwd = exp(confBwd * pc.temperature);
-    float total = wFwd + wBwd;
-    wFwd /= total;
-    wBwd /= total;
-
     vec4 fwd = imageLoad(warpedFwd, p);
     vec4 bwd = imageLoad(warpedBwd, p);
-    vec4 result = fwd * wFwd * (1.0 - pc.t) + bwd * wBwd * pc.t;
 
-    if (min(confFwd, confBwd) < 0.3) {
-        vec2 uv = (vec2(p) + 0.5) / vec2(pc.resolution);
-        vec4 prev = texture(prevFrame, uv);
-        vec4 curr = texture(currFrame, uv);
-        result = mix(prev, curr, pc.t);
-    }
+    float diff = length(fwd.rgb - bwd.rgb);
+    float agree = clamp(1.0 - diff * 1.2, 0.0, 1.0);
+
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.resolution);
+    vec4 lerpC = mix(texture(prevFrame, uv), texture(currFrame, uv), pc.t);
+    vec4 warpC = 0.5 * (fwd + bwd);
+
+    vec4 result = mix(lerpC, warpC, agree);
 
     imageStore(outputFrame, p, vec4(result.rgb, 1.0));
 }

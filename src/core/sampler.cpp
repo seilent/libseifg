@@ -2,7 +2,7 @@
 
 namespace seifg {
 
-bool Samplers::init(VkDevice device) {
+bool Samplers::init(VkDevice device, bool imageProcessing) {
     VkSamplerCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     ci.magFilter = VK_FILTER_LINEAR;
@@ -18,12 +18,21 @@ bool Samplers::init(VkDevice device) {
     ci.minFilter = VK_FILTER_NEAREST;
 
     lastResult = vkCreateSampler(device, &ci, nullptr, &nearest);
-    return lastResult == VK_SUCCESS;
+    if (lastResult != VK_SUCCESS) return false;
+
+    if (imageProcessing) {
+        ci.flags = VK_SAMPLER_CREATE_IMAGE_PROCESSING_BIT_QCOM;
+        ci.unnormalizedCoordinates = VK_TRUE;
+        lastResult = vkCreateSampler(device, &ci, nullptr, &unnormalized);
+        if (lastResult != VK_SUCCESS) return false;
+    }
+    return true;
 }
 
 void Samplers::destroy(VkDevice device) {
     if (bilinear) { vkDestroySampler(device, bilinear, nullptr); bilinear = VK_NULL_HANDLE; }
     if (nearest) { vkDestroySampler(device, nearest, nullptr); nearest = VK_NULL_HANDLE; }
+    if (unnormalized) { vkDestroySampler(device, unnormalized, nullptr); unnormalized = VK_NULL_HANDLE; }
 }
 
 }

@@ -35,7 +35,7 @@ foreach(SHADER ${SEIFG_SHADER_SOURCES})
 
     add_custom_command(
         OUTPUT ${SPV_FILE}
-        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.1 -o ${SPV_FILE} ${SHADER}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -o ${SPV_FILE} ${SHADER}
         DEPENDS ${SHADER}
         VERBATIM
     )

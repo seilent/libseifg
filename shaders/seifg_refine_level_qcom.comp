@@ -1,0 +1,56 @@
+#version 450
+#extension GL_QCOM_image_processing : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rg16f) uniform readonly image2D mvCoarser;
+layout(set = 0, binding = 1) uniform sampler2D prevLuma;
+layout(set = 0, binding = 2) uniform sampler2D currLuma;
+layout(set = 0, binding = 3, rg16f) uniform writeonly image2D mvRefined;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+const uvec2 BLK = uvec2(4, 4);
+
+float sad(ivec2 tcenter, ivec2 rcenter) {
+    ivec2 h = ivec2(BLK) / 2;
+    ivec2 maxc = ivec2(pc.resolution) - ivec2(BLK);
+    ivec2 t = clamp(tcenter - h, ivec2(0), maxc);
+    ivec2 r = clamp(rcenter - h, ivec2(0), maxc);
+    return textureBlockMatchSADQCOM(currLuma, uvec2(t), prevLuma, uvec2(r), BLK).x;
+}
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
+
+    ivec2 coarseCoord = ivec2(coord) / 2;
+    vec2 mv = imageLoad(mvCoarser, coarseCoord).rg * 2.0;
+
+    if (pc.level == 0) {
+        imageStore(mvRefined, ivec2(coord), vec4(mv, 0.0, 0.0));
+        return;
+    }
+
+    ivec2 center = ivec2(coord);
+    ivec2 base = ivec2(round(mv));
+    ivec2 bestOff = base;
+    float bestSad = sad(center, center + bestOff);
+
+    ivec2 cand[4] = ivec2[](ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2));
+    for (int i = 0; i < 4; i++) {
+        ivec2 o = base + cand[i];
+        float s = sad(center, center + o);
+        if (s < bestSad) { bestSad = s; bestOff = o; }
+    }
+
+    imageStore(mvRefined, ivec2(coord), vec4(vec2(bestOff), 0.0, 0.0));
+}

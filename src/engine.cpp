@@ -80,14 +80,16 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
     if (!device.init(deviceUUID)) return false;
     VkDevice dev = device.device;
 
-    if (!samplers.init(dev)) return false;
+    if (!samplers.init(dev, device.hasImageProcessing)) return false;
     if (!commands.init(dev, device.computeQueueFamily)) return false;
     if (!descriptorPool.init(dev)) return false;
 
     VkDescriptorType lumaTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType pyramidTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType blockTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    VkDescriptorType refineTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType blockTypesQcom[] = {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType refineTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType refineTypesQcom[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType filterTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType occTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType warpTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
@@ -95,8 +97,13 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
 
     if (!initPipeline(lumaConvertPipeline, dev, shaders::seifg_luma_convert_spv, shaders::seifg_luma_convert_spv_size, lumaTypes, 2)) return false;
     if (!initPipeline(pyramidDownsamplePipeline, dev, shaders::seifg_pyramid_downsample_spv, shaders::seifg_pyramid_downsample_spv_size, pyramidTypes, 2)) return false;
-    if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_spv, shaders::seifg_block_match_coarse_spv_size, blockTypes, 3)) return false;
-    if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_spv, shaders::seifg_refine_level_spv_size, refineTypes, 4)) return false;
+    if (useQcom) {
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_qcom_spv, shaders::seifg_block_match_coarse_qcom_spv_size, blockTypesQcom, 3)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_qcom_spv, shaders::seifg_refine_level_qcom_spv_size, refineTypesQcom, 4)) return false;
+    } else {
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_spv, shaders::seifg_block_match_coarse_spv_size, blockTypes, 3)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_spv, shaders::seifg_refine_level_spv_size, refineTypes, 4)) return false;
+    }
     if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 3)) return false;
     if (!initPipeline(occlusionPipeline, dev, shaders::seifg_occlusion_spv, shaders::seifg_occlusion_spv_size, occTypes, 3)) return false;
     if (!initPipeline(warpPipeline, dev, shaders::seifg_warp_spv, shaders::seifg_warp_spv_size, warpTypes, 3)) return false;
@@ -111,12 +118,15 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
     VkDevice dev = device.device;
     VkPhysicalDevice phys = device.physicalDevice;
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageUsageFlags lumaUsage = usage;
+    if (useQcom)
+        lumaUsage |= VK_IMAGE_USAGE_SAMPLE_BLOCK_MATCH_BIT_QCOM;
 
     for (uint32_t i = 0; i < PYRAMID_LEVELS; i++) {
         uint32_t lw = w >> i;
         uint32_t lh = h >> i;
-        if (!lumaPrev[i].createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, lw, lh, usage)) return false;
-        if (!lumaCurr[i].createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, lw, lh, usage)) return false;
+        if (!lumaPrev[i].createInternal(dev, phys, VK_FORMAT_R8_UNORM, lw, lh, lumaUsage)) return false;
+        if (!lumaCurr[i].createInternal(dev, phys, VK_FORMAT_R8_UNORM, lw, lh, lumaUsage)) return false;
     }
 
     uint32_t cw = w >> 4;
@@ -166,17 +176,28 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
         pool.updateStorageImage(dev, dsPyramid[i + 4], 1, lumaCurr[dst].view, general);
     }
 
-    pool.updateStorageImage(dev, dsBlockMatch, 0, lumaPrev[4].view, general);
-    pool.updateStorageImage(dev, dsBlockMatch, 1, lumaCurr[4].view, general);
+    if (useQcom) {
+        pool.updateBlockMatchImage(dev, dsBlockMatch, 0, lumaPrev[4].view, samplers.unnormalized, general);
+        pool.updateBlockMatchImage(dev, dsBlockMatch, 1, lumaCurr[4].view, samplers.unnormalized, general);
+    } else {
+        pool.updateStorageImage(dev, dsBlockMatch, 0, lumaPrev[4].view, general);
+        pool.updateStorageImage(dev, dsBlockMatch, 1, lumaCurr[4].view, general);
+    }
     pool.updateStorageImage(dev, dsBlockMatch, 2, mvCoarse.view, general);
 
     for (uint32_t i = 0; i < 4; i++) {
         uint32_t prevLevel = (i == 0) ? 4 : 3 - (i - 1);
         Image& prevMv = (i == 0) ? mvCoarse : mvRefined[i - 1];
         uint32_t pyrLevel = 3 - i;
-        pool.updateStorageImage(dev, dsRefine[i], 0, prevMv.view, general);
-        pool.updateCombinedImageSampler(dev, dsRefine[i], 1, lumaPrev[pyrLevel].view, samplers.bilinear, general);
-        pool.updateCombinedImageSampler(dev, dsRefine[i], 2, lumaCurr[pyrLevel].view, samplers.bilinear, general);
+        if (useQcom) {
+            pool.updateStorageImage(dev, dsRefine[i], 0, prevMv.view, general);
+            pool.updateBlockMatchImage(dev, dsRefine[i], 1, lumaPrev[pyrLevel].view, samplers.unnormalized, general);
+            pool.updateBlockMatchImage(dev, dsRefine[i], 2, lumaCurr[pyrLevel].view, samplers.unnormalized, general);
+        } else {
+            pool.updateCombinedImageSampler(dev, dsRefine[i], 0, prevMv.view, samplers.bilinear, general);
+            pool.updateCombinedImageSampler(dev, dsRefine[i], 1, lumaPrev[pyrLevel].view, samplers.bilinear, general);
+            pool.updateCombinedImageSampler(dev, dsRefine[i], 2, lumaCurr[pyrLevel].view, samplers.bilinear, general);
+        }
         pool.updateStorageImage(dev, dsRefine[i], 3, mvRefined[i].view, general);
     }
 
