@@ -90,7 +90,7 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
     VkDescriptorType blockTypesQcom[] = {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType refineTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType refineTypesQcom[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    VkDescriptorType filterTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType filterTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType occTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType warpTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
     VkDescriptorType blendTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
@@ -104,7 +104,7 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
         if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_spv, shaders::seifg_block_match_coarse_spv_size, blockTypes, 3)) return false;
         if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_spv, shaders::seifg_refine_level_spv_size, refineTypes, 4)) return false;
     }
-    if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 3)) return false;
+    if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 4)) return false;
     if (!initPipeline(occlusionPipeline, dev, shaders::seifg_occlusion_spv, shaders::seifg_occlusion_spv_size, occTypes, 3)) return false;
     if (!initPipeline(warpPipeline, dev, shaders::seifg_warp_spv, shaders::seifg_warp_spv_size, warpTypes, 3)) return false;
     if (!initPipeline(blendPipeline, dev, shaders::seifg_blend_spv, shaders::seifg_blend_spv_size, blendTypes, 6)) return false;
@@ -141,6 +141,8 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
 
     if (!mvFiltered.createInternal(dev, phys, VK_FORMAT_R16G16_SFLOAT, w, h, usage)) return false;
     if (!mvBackward.createInternal(dev, phys, VK_FORMAT_R16G16_SFLOAT, w, h, usage)) return false;
+    if (!mvHistory.createInternal(dev, phys, VK_FORMAT_R16G16_SFLOAT, w, h, usage)) return false;
+    frameCounter = 0;
     if (!confidence.createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, w, h, usage)) return false;
     if (!warpedForward.createInternal(dev, phys, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, usage)) return false;
     if (!warpedBackward.createInternal(dev, phys, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, usage)) return false;
@@ -204,6 +206,7 @@ bool Engine::createResources(uint32_t w, uint32_t h) {
     pool.updateStorageImage(dev, dsFlowFilter, 0, mvRefined[3].view, general);
     pool.updateStorageImage(dev, dsFlowFilter, 1, mvFiltered.view, general);
     pool.updateStorageImage(dev, dsFlowFilter, 2, mvBackward.view, general);
+    pool.updateStorageImage(dev, dsFlowFilter, 3, mvHistory.view, general);
 
     pool.updateStorageImage(dev, dsOcclusion, 0, mvFiltered.view, general);
     pool.updateStorageImage(dev, dsOcclusion, 1, mvBackward.view, general);
@@ -249,6 +252,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     pc.t = t;
     pc.threshold = 4.0f;
     pc.temperature = 5.0f;
+    pc._pad = frameCounter;
 
     auto dispatch = [&](Pipeline& p, VkDescriptorSet ds, uint32_t dw, uint32_t dh) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
@@ -317,6 +321,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     externalRelease(cmd, in1.image, qf);
     externalRelease(cmd, out.image, qf);
 
+    frameCounter++;
     return commands.submit(dev, device.computeQueue);
 }
 
@@ -331,6 +336,7 @@ void Engine::destroyResources() {
         mvRefined[i].destroy(dev);
     mvFiltered.destroy(dev);
     mvBackward.destroy(dev);
+    mvHistory.destroy(dev);
     confidence.destroy(dev);
     warpedForward.destroy(dev);
     warpedBackward.destroy(dev);

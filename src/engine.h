@@ -32,6 +32,7 @@ struct Engine {
     Image mvRefined[PYRAMID_LEVELS - 1];
     Image mvFiltered;
     Image mvBackward;
+    Image mvHistory;
     Image confidence;
     Image warpedForward;
     Image warpedBackward;
@@ -49,6 +50,7 @@ struct Engine {
     uint32_t height = 0;
     float flowScale = 0.5f;
     bool useQcom = false;
+    uint32_t frameCounter = 0;
 
     bool init(uint64_t deviceUUID, float flowScale);
     void destroy();
