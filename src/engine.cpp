@@ -70,12 +70,24 @@ static void externalRelease(VkCommandBuffer cmd, VkImage image, uint32_t srcFami
 }
 
 static bool initPipeline(Pipeline& p, VkDevice dev, const uint8_t* spv, size_t size,
-                          const VkDescriptorType* types, uint32_t count) {
-    return p.init(dev, reinterpret_cast<const uint32_t*>(spv), static_cast<uint32_t>(size), types, count);
+                          const VkDescriptorType* types, uint32_t count,
+                          const VkSpecializationInfo* spec = nullptr) {
+    return p.init(dev, reinterpret_cast<const uint32_t*>(spv), static_cast<uint32_t>(size), types, count, spec);
 }
 
 bool Engine::init(uint64_t deviceUUID, float fs) {
     flowScale = fs;
+    quality = (int)(fs * 4.0f + 0.5f);
+    if (quality < 0) quality = 0;
+    if (quality > 4) quality = 4;
+    const int32_t radius = (quality <= 1) ? 2 : (quality == 2 ? 3 : 4);
+    const int32_t iters = (quality == 0) ? 1 : (quality == 4 ? 3 : 2);
+    int32_t coarseSpecData[1] = { radius };
+    VkSpecializationMapEntry coarseEntry[1] = {{0, 0, sizeof(int32_t)}};
+    VkSpecializationInfo coarseSpec{1, coarseEntry, sizeof(coarseSpecData), coarseSpecData};
+    int32_t refineSpecData[2] = { radius, iters };
+    VkSpecializationMapEntry refineEntries[2] = {{0, 0, sizeof(int32_t)}, {1, sizeof(int32_t), sizeof(int32_t)}};
+    VkSpecializationInfo refineSpec{2, refineEntries, sizeof(refineSpecData), refineSpecData};
 
     if (!device.init(deviceUUID)) return false;
     VkDevice dev = device.device;
@@ -101,8 +113,8 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
         if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_qcom_spv, shaders::seifg_block_match_coarse_qcom_spv_size, blockTypesQcom, 3)) return false;
         if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_qcom_spv, shaders::seifg_refine_level_qcom_spv_size, refineTypesQcom, 4)) return false;
     } else {
-        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_lk_coarse_spv, shaders::seifg_lk_coarse_spv_size, blockTypes, 3)) return false;
-        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_lk_refine_spv, shaders::seifg_lk_refine_spv_size, refineTypes, 4)) return false;
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_lk_coarse_spv, shaders::seifg_lk_coarse_spv_size, blockTypes, 3, &coarseSpec)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_lk_refine_spv, shaders::seifg_lk_refine_spv_size, refineTypes, 4, &refineSpec)) return false;
     }
     if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 3)) return false;
     if (!initPipeline(occlusionPipeline, dev, shaders::seifg_occlusion_spv, shaders::seifg_occlusion_spv_size, occTypes, 3)) return false;

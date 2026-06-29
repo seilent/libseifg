@@ -3,7 +3,8 @@
 namespace seifg {
 
 bool Pipeline::init(VkDevice device, const uint32_t* spirv, uint32_t spirvSize,
-                    const VkDescriptorType* bindingTypes, uint32_t bindingCount) {
+                    const VkDescriptorType* bindingTypes, uint32_t bindingCount,
+                    const VkSpecializationInfo* specInfo) {
     VkShaderModuleCreateInfo smCI{};
     smCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     smCI.codeSize = spirvSize;
@@ -50,6 +51,7 @@ bool Pipeline::init(VkDevice device, const uint32_t* spirv, uint32_t spirvSize,
     cpCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cpCI.stage.module = shaderModule;
     cpCI.stage.pName = "main";
+    cpCI.stage.pSpecializationInfo = specInfo;
     cpCI.layout = pipelineLayout;
 
     lastResult = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &pipeline);

@@ -24,7 +24,8 @@ struct Pipeline {
     VkResult lastResult = VK_SUCCESS;
 
     bool init(VkDevice device, const uint32_t* spirv, uint32_t spirvSize,
-              const VkDescriptorType* bindingTypes, uint32_t bindingCount);
+              const VkDescriptorType* bindingTypes, uint32_t bindingCount,
+              const VkSpecializationInfo* specInfo = nullptr);
     void destroy(VkDevice device);
 };
 

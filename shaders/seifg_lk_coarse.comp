@@ -16,6 +16,8 @@ layout(push_constant) uniform PushConstants {
     uint _pad;
 } pc;
 
+layout(constant_id = 0) const int RADIUS = 3;
+
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.resolution.x) || coord.y >= int(pc.resolution.y)) return;
@@ -24,8 +26,8 @@ void main() {
     vec2 g = vec2(0.0);
 
     float Sxx = 0.0, Syy = 0.0, Sxy = 0.0, Sxt = 0.0, Syt = 0.0;
-    for (int dy = -3; dy <= 3; dy++) {
-        for (int dx = -3; dx <= 3; dx++) {
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
             float w = exp(-float(dx * dx + dy * dy) / 8.0);
             vec2 q = vec2(coord) + vec2(dx, dy);
             vec2 quv = (q + 0.5) * invRes;
