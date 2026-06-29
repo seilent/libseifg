@@ -17,8 +17,6 @@ layout(push_constant) uniform PushConstants {
     uint _pad;
 } pc;
 
-shared float16_t block[16][16];
-
 float sadPatch(ivec2 center, ivec2 offset) {
     float sad = 0.0;
     for (int dy = -2; dy <= 2; dy++) {

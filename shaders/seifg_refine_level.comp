@@ -70,6 +70,7 @@ void main() {
 
         sL = sadPatchSampled(center, bestOff + vec2(0.0, -0.5));
         sR = sadPatchSampled(center, bestOff + vec2(0.0, 0.5));
+        sC = sadPatchSampled(center, bestOff);
         denom = sL - 2.0 * sC + sR;
         if (abs(denom) > 1e-6) {
             bestOff.y += 0.5 * (sL - sR) / denom;

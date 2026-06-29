@@ -226,6 +226,8 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     pc.height = height;
     pc.flowScale = flowScale;
     pc.t = t;
+    pc.threshold = 4.0f;
+    pc.temperature = 5.0f;
 
     auto dispatch = [&](Pipeline& p, VkDescriptorSet ds, uint32_t dw, uint32_t dh) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
@@ -248,14 +250,9 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
         pc.level = i + 1;
         dispatch(pyramidDownsamplePipeline, dsPyramid[i], lw, lh);
         dispatch(pyramidDownsamplePipeline, dsPyramid[i + 4], lw, lh);
+        VkImage levelImgs[] = {lumaPrev[i + 1].image, lumaCurr[i + 1].image};
+        barrierMulti(cmd, levelImgs, 2);
     }
-
-    VkImage allPyr[8];
-    for (uint32_t i = 0; i < 4; i++) {
-        allPyr[i] = lumaPrev[i + 1].image;
-        allPyr[i + 4] = lumaCurr[i + 1].image;
-    }
-    barrierMulti(cmd, allPyr, 8);
 
     pc.width = width >> 4;
     pc.height = height >> 4;
@@ -285,7 +282,9 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image& out, float t) {
     barrier(cmd, confidence.image);
 
     dispatch(warpPipeline, dsWarp[0], width, height);
+    pc.t = 1.0f - t;
     dispatch(warpPipeline, dsWarp[1], width, height);
+    pc.t = t;
 
     VkImage warpOut[] = {warpedForward.image, warpedBackward.image};
     barrierMulti(cmd, warpOut, 2);
