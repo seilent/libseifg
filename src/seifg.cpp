@@ -31,6 +31,11 @@ int32_t createContextFromAHB(
     VkDevice dev = g_engine->device.device;
     VkPhysicalDevice phys = g_engine->device.physicalDevice;
 
+    g_in0.destroy(dev);
+    g_in1.destroy(dev);
+    for (auto& img : g_outN) img.destroy(dev);
+    g_outN.clear();
+
     if (!g_in0.createFromAHB(dev, phys, in0, extent, format)) return -1;
     if (!g_in1.createFromAHB(dev, phys, in1, extent, format)) return -1;
 

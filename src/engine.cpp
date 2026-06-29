@@ -113,6 +113,7 @@ bool Engine::init(uint64_t deviceUUID, float fs) {
 }
 
 bool Engine::createResources(uint32_t w, uint32_t h) {
+    destroyResources();
     width = w;
     height = h;
     VkDevice dev = device.device;
@@ -346,6 +347,8 @@ void Engine::destroyResources() {
     confidence.destroy(dev);
     warpedForward.destroy(dev);
     warpedBackward.destroy(dev);
+    if (descriptorPool.pool != VK_NULL_HANDLE)
+        vkResetDescriptorPool(dev, descriptorPool.pool, 0);
 }
 
 void Engine::destroy() {
