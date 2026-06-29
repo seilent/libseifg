@@ -139,8 +139,68 @@ static void measureScene(AHardwareBuffer* ahb, int boxX, int boxW, int edge,
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
-int main(int argc, char** argv) {
-    const uint32_t W = 1280, H = 720;
+static const int GRID_SP = 24;
+static const int GRID_TH = 3;
+
+static uint8_t gridPixel(int srcX, int y) {
+    int gx = ((srcX % GRID_SP) + GRID_SP) % GRID_SP;
+    int gy = ((y % GRID_SP) + GRID_SP) % GRID_SP;
+    if (gx < GRID_TH || gy < GRID_TH) return 0;
+    return pat(srcX, y);
+}
+
+static void fillGrid(AHardwareBuffer* ahb, int shiftX) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    for (uint32_t y = 0; y < d.height; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = 0; x < d.width; x++) {
+            uint8_t v = gridPixel((int)x - shiftX, (int)y);
+            row[x*4+0] = v; row[x*4+1] = v; row[x*4+2] = v; row[x*4+3] = 255;
+        }
+    }
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void measureGrid(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    const int B = 16;
+    const int m = 32;
+    double globalErr = 0.0; long gN = 0; double gMax = 0.0;
+    std::vector<double> blockErr;
+    for (uint32_t by = m; by + B < H - m; by += B) {
+        for (uint32_t bx = m; bx + B < W - m; bx += B) {
+            double be = 0.0; int bn = 0;
+            for (int yy = 0; yy < B; yy++) {
+                uint8_t* row = base + (size_t)(by + yy) * d.stride * 4;
+                for (int xx = 0; xx < B; xx++) {
+                    int outv = row[(bx + xx) * 4];
+                    int ref = gridPixel((int)(bx + xx) - refShift, (int)(by + yy));
+                    double e = fabs((double)outv - ref);
+                    be += e; bn++; globalErr += e; gN++;
+                    if (e > gMax) gMax = e;
+                }
+            }
+            blockErr.push_back(be / bn);
+        }
+    }
+    double mean = globalErr / gN;
+    double bmean = 0.0; for (double e : blockErr) bmean += e; bmean /= blockErr.size();
+    double bvar = 0.0;
+    for (double e : blockErr) bvar += (e - bmean) * (e - bmean);
+    double bstd = sqrt(bvar / blockErr.size());
+    printf("%s meanErr=%.1f  blockStdErr=%.1f  maxErr=%.0f\n", label, mean, bstd, gMax);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
     const float flowScale = (argc > 3) ? (float)atof(argv[3]) : 0.5f;
@@ -190,6 +250,18 @@ int main(int argc, char** argv) {
         char label[80];
         snprintf(label, sizeof(label), "  t=%d/%d", i + 1, M);
         measureScene(outs[i], boxXt, BOXW, 12, W, H, label);
+    }
+
+    fillGrid(in0, 0);
+    fillGrid(in1, 2 * SHIFT);
+    seifg::presentContext(ctx, -1, {});
+    seifg::waitIdle();
+    printf("-- grid/fence pan +%dpx (%dpx spacing, %dpx lines over noise) --\n", 2 * SHIFT, GRID_SP, GRID_TH);
+    for (int i = 0; i < N; i++) {
+        int gShift = (int)lround(2.0 * SHIFT * (i + 1) / (double)M);
+        char label[80];
+        snprintf(label, sizeof(label), "  t=%d/%d +%dpx", i + 1, M, gShift);
+        measureGrid(outs[i], gShift, W, H, label);
     }
 
     fillShifted(in0, 0);
