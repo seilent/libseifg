@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x=16, local_size_y=16, local_size_z=1) in;
+
+layout(binding=0, rg16f) uniform readonly image2D mvForwardRaw;
+layout(binding=1, rg16f) uniform writeonly image2D mvForward;
+layout(binding=2, rg16f) uniform writeonly image2D mvBackward;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+#define SWAP(a, b) { float tmp = min(a, b); b = max(a, b); a = tmp; }
+
+void sort9(inout float v[9]) {
+    SWAP(v[0], v[1]); SWAP(v[3], v[4]); SWAP(v[6], v[7]);
+    SWAP(v[1], v[2]); SWAP(v[4], v[5]); SWAP(v[7], v[8]);
+    SWAP(v[0], v[1]); SWAP(v[3], v[4]); SWAP(v[6], v[7]);
+    SWAP(v[0], v[3]); SWAP(v[3], v[6]); SWAP(v[0], v[3]);
+    SWAP(v[1], v[4]); SWAP(v[4], v[7]); SWAP(v[1], v[4]);
+    SWAP(v[2], v[5]); SWAP(v[5], v[8]); SWAP(v[2], v[5]);
+    SWAP(v[1], v[3]); SWAP(v[5], v[7]);
+    SWAP(v[2], v[6]); SWAP(v[4], v[6]); SWAP(v[2], v[4]);
+    SWAP(v[2], v[3]); SWAP(v[5], v[6]);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.resolution.x) || p.y >= int(pc.resolution.y)) return;
+
+    float vx[9];
+    float vy[9];
+    int idx = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 c = clamp(p + ivec2(dx, dy), ivec2(0), ivec2(pc.resolution) - 1);
+            vec2 mv = imageLoad(mvForwardRaw, c).xy;
+            vx[idx] = mv.x;
+            vy[idx] = mv.y;
+            idx++;
+        }
+    }
+
+    sort9(vx);
+    sort9(vy);
+
+    vec2 filtered = vec2(vx[4], vy[4]);
+    imageStore(mvForward, p, vec4(filtered, 0.0, 0.0));
+    imageStore(mvBackward, p, vec4(-filtered, 0.0, 0.0));
+}

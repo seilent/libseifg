@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x=16, local_size_y=16, local_size_z=1) in;
+
+layout(binding=0, rgba16f) uniform readonly image2D warpedFwd;
+layout(binding=1, rgba16f) uniform readonly image2D warpedBwd;
+layout(binding=2, r16f) uniform readonly image2D confidence;
+layout(binding=3) uniform sampler2D prevFrame;
+layout(binding=4) uniform sampler2D currFrame;
+layout(binding=5, rgba8) uniform writeonly image2D outputFrame;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.resolution.x) || p.y >= int(pc.resolution.y)) return;
+
+    float confFwd = imageLoad(confidence, p).r;
+    float confBwd = confFwd;
+
+    float wFwd = exp(confFwd * pc.temperature);
+    float wBwd = exp(confBwd * pc.temperature);
+    float total = wFwd + wBwd;
+    wFwd /= total;
+    wBwd /= total;
+
+    vec4 fwd = imageLoad(warpedFwd, p);
+    vec4 bwd = imageLoad(warpedBwd, p);
+    vec4 result = fwd * wFwd * (1.0 - pc.t) + bwd * wBwd * pc.t;
+
+    if (min(confFwd, confBwd) < 0.3) {
+        vec2 uv = (vec2(p) + 0.5) / vec2(pc.resolution);
+        vec4 prev = texture(prevFrame, uv);
+        vec4 curr = texture(currFrame, uv);
+        result = mix(prev, curr, pc.t);
+    }
+
+    imageStore(outputFrame, p, vec4(result.rgb, 1.0));
+}

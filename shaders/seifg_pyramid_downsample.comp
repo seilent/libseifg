@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcLevel;
+layout(set = 0, binding = 1, r16f) uniform writeonly image2D dstLevel;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.resolution);
+    float16_t val = float16_t(texture(srcLevel, uv).r);
+
+    imageStore(dstLevel, ivec2(coord), vec4(float(val), 0.0, 0.0, 0.0));
+}

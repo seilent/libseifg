@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcFrame;
+layout(set = 0, binding = 1, r16f) uniform writeonly image2D lumaOut;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.resolution);
+    vec3 rgb = texture(srcFrame, uv).rgb;
+
+    float16_t luma = float16_t(0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b);
+
+    imageStore(lumaOut, ivec2(coord), vec4(float(luma), 0.0, 0.0, 0.0));
+}

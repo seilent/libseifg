@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x=16, local_size_y=16, local_size_z=1) in;
+
+layout(binding=0, rg16f) uniform readonly image2D mvForward;
+layout(binding=1, rg16f) uniform readonly image2D mvBackward;
+layout(binding=2, r16f) uniform writeonly image2D confidence;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.resolution.x) || p.y >= int(pc.resolution.y)) return;
+
+    vec2 fwd = imageLoad(mvForward, p).xy;
+    ivec2 bwdCoord = clamp(ivec2(vec2(p) + fwd + 0.5), ivec2(0), ivec2(pc.resolution) - 1);
+    vec2 bwd = imageLoad(mvBackward, bwdCoord).xy;
+
+    float error = length(fwd + bwd);
+    float conf = clamp(1.0 - error / pc.threshold, 0.0, 1.0);
+    conf *= exp(-length(fwd) * 0.05);
+
+    imageStore(confidence, p, vec4(conf));
+}

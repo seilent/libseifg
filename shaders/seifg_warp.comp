@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x=16, local_size_y=16, local_size_z=1) in;
+
+layout(binding=0) uniform sampler2D srcFrame;
+layout(binding=1, rg16f) uniform readonly image2D motionVectors;
+layout(binding=2, rgba16f) uniform writeonly image2D warpedFrame;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.resolution.x) || p.y >= int(pc.resolution.y)) return;
+
+    vec2 mv = imageLoad(motionVectors, p).xy;
+    vec2 srcCoord = (vec2(p) + mv * pc.t + vec2(0.5)) / vec2(pc.resolution);
+    vec4 color = texture(srcFrame, srcCoord);
+
+    imageStore(warpedFrame, p, color);
+}

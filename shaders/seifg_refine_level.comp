@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rg16f) uniform readonly image2D mvCoarser;
+layout(set = 0, binding = 1) uniform sampler2D prevLuma;
+layout(set = 0, binding = 2) uniform sampler2D currLuma;
+layout(set = 0, binding = 3, rg16f) uniform writeonly image2D mvRefined;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+float sadPatchSampled(ivec2 center, vec2 offset) {
+    float sad = 0.0;
+    vec2 invRes = 1.0 / vec2(pc.resolution);
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            vec2 cUv = (vec2(center) + vec2(dx, dy) + 0.5) * invRes;
+            vec2 pUv = (vec2(center) + offset + vec2(dx, dy) + 0.5) * invRes;
+            float cv = texture(currLuma, cUv).r;
+            float pv = texture(prevLuma, pUv).r;
+            sad += abs(cv - pv);
+        }
+    }
+    return sad;
+}
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
+
+    ivec2 coarseCoord = ivec2(coord) / 2;
+    vec2 mv = imageLoad(mvCoarser, coarseCoord).rg * 2.0;
+
+    ivec2 center = ivec2(coord);
+    vec2 bestOff = mv;
+    float bestSad = sadPatchSampled(center, bestOff);
+
+    vec2 candidates[5];
+    candidates[0] = bestOff;
+    candidates[1] = bestOff + vec2(2.0, 0.0);
+    candidates[2] = bestOff + vec2(-2.0, 0.0);
+    candidates[3] = bestOff + vec2(0.0, 2.0);
+    candidates[4] = bestOff + vec2(0.0, -2.0);
+
+    for (int i = 1; i < 5; i++) {
+        float s = sadPatchSampled(center, candidates[i]);
+        if (s < bestSad) {
+            bestSad = s;
+            bestOff = candidates[i];
+        }
+    }
+
+    if (pc.level == 0) {
+        float sL = sadPatchSampled(center, bestOff + vec2(-0.5, 0.0));
+        float sR = sadPatchSampled(center, bestOff + vec2(0.5, 0.0));
+        float sC = bestSad;
+        float denom = sL - 2.0 * sC + sR;
+        if (abs(denom) > 1e-6) {
+            bestOff.x += 0.5 * (sL - sR) / denom;
+        }
+
+        sL = sadPatchSampled(center, bestOff + vec2(0.0, -0.5));
+        sR = sadPatchSampled(center, bestOff + vec2(0.0, 0.5));
+        denom = sL - 2.0 * sC + sR;
+        if (abs(denom) > 1e-6) {
+            bestOff.y += 0.5 * (sL - sR) / denom;
+        }
+    }
+
+    imageStore(mvRefined, ivec2(coord), vec4(bestOff, 0.0, 0.0));
+}
