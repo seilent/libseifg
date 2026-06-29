@@ -33,44 +33,13 @@ float sadPatchSampled(ivec2 center, vec2 offset) {
     return sad;
 }
 
-#define SWAP(a, b) { float tmp = min(a, b); b = max(a, b); a = tmp; }
-
-float median9(float v0, float v1, float v2, float v3, float v4, float v5, float v6, float v7, float v8) {
-    float v[9];
-    v[0]=v0; v[1]=v1; v[2]=v2; v[3]=v3; v[4]=v4; v[5]=v5; v[6]=v6; v[7]=v7; v[8]=v8;
-    SWAP(v[0], v[1]); SWAP(v[3], v[4]); SWAP(v[6], v[7]);
-    SWAP(v[1], v[2]); SWAP(v[4], v[5]); SWAP(v[7], v[8]);
-    SWAP(v[0], v[1]); SWAP(v[3], v[4]); SWAP(v[6], v[7]);
-    SWAP(v[0], v[3]); SWAP(v[3], v[6]); SWAP(v[0], v[3]);
-    SWAP(v[1], v[4]); SWAP(v[4], v[7]); SWAP(v[1], v[4]);
-    SWAP(v[2], v[5]); SWAP(v[5], v[8]); SWAP(v[2], v[5]);
-    SWAP(v[1], v[3]); SWAP(v[5], v[7]);
-    SWAP(v[2], v[6]); SWAP(v[4], v[6]); SWAP(v[2], v[4]);
-    SWAP(v[2], v[3]); SWAP(v[5], v[6]);
-    return v[4];
-}
-
-vec2 medianCoarser(vec2 uv, vec2 step) {
-    vec2 s[9];
-    int k = 0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            s[k] = texture(mvCoarser, uv + vec2(dx, dy) * step).rg;
-            k++;
-        }
-    }
-    return vec2(
-        median9(s[0].x, s[1].x, s[2].x, s[3].x, s[4].x, s[5].x, s[6].x, s[7].x, s[8].x),
-        median9(s[0].y, s[1].y, s[2].y, s[3].y, s[4].y, s[5].y, s[6].y, s[7].y, s[8].y));
-}
-
 void main() {
     uvec2 coord = gl_GlobalInvocationID.xy;
     if (coord.x >= pc.resolution.x || coord.y >= pc.resolution.y) return;
 
-    vec2 invRes = 1.0 / vec2(pc.resolution);
-    vec2 uv = (vec2(coord) + 0.5) * invRes;
-    vec2 mv = medianCoarser(uv, 2.0 * invRes) * 2.0;
+    ivec2 coarseCoord = ivec2(coord) / 2;
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.resolution);
+    vec2 mv = texture(mvCoarser, uv).rg * 2.0;
 
     if (pc.level == 0) {
         imageStore(mvRefined, ivec2(coord), vec4(mv, 0.0, 0.0));
@@ -78,10 +47,8 @@ void main() {
     }
 
     ivec2 center = ivec2(coord);
-    vec2 pred = mv;
     vec2 bestOff = mv;
-    float lambda = 0.6;
-    float bestCost = sadPatchSampled(center, bestOff);
+    float bestSad = sadPatchSampled(center, bestOff);
 
     vec2 candidates[5];
     candidates[0] = bestOff;
@@ -91,9 +58,9 @@ void main() {
     candidates[4] = bestOff + vec2(0.0, -2.0);
 
     for (int i = 1; i < 5; i++) {
-        float cost = sadPatchSampled(center, candidates[i]) + lambda * length(candidates[i] - pred);
-        if (cost < bestCost) {
-            bestCost = cost;
+        float s = sadPatchSampled(center, candidates[i]);
+        if (s < bestSad) {
+            bestSad = s;
             bestOff = candidates[i];
         }
     }

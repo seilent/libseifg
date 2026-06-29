@@ -6,7 +6,6 @@ layout(local_size_x=16, local_size_y=16, local_size_z=1) in;
 layout(binding=0, rg16f) uniform readonly image2D mvForwardRaw;
 layout(binding=1, rg16f) uniform writeonly image2D mvForward;
 layout(binding=2, rg16f) uniform writeonly image2D mvBackward;
-layout(binding=3, rg16f) uniform image2D mvHistory;
 
 layout(push_constant) uniform PushConstants {
     uvec2 resolution;
@@ -53,16 +52,6 @@ void main() {
     sort9(vy);
 
     vec2 filtered = vec2(vx[4], vy[4]);
-
-    vec2 stable = filtered;
-    if (pc._pad != 0u) {
-        vec2 hist = imageLoad(mvHistory, p).xy;
-        float d = length(filtered - hist);
-        float alpha = clamp(0.7 - d * 0.15, 0.0, 0.7);
-        stable = mix(filtered, hist, alpha);
-    }
-    imageStore(mvHistory, p, vec4(stable, 0.0, 0.0));
-
-    imageStore(mvForward, p, vec4(stable, 0.0, 0.0));
-    imageStore(mvBackward, p, vec4(-stable, 0.0, 0.0));
+    imageStore(mvForward, p, vec4(filtered, 0.0, 0.0));
+    imageStore(mvBackward, p, vec4(-filtered, 0.0, 0.0));
 }

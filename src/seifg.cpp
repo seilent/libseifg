@@ -31,6 +31,11 @@ int32_t createContextFromAHB(
     VkDevice dev = g_engine->device.device;
     VkPhysicalDevice phys = g_engine->device.physicalDevice;
 
+    g_in0.destroy(dev);
+    g_in1.destroy(dev);
+    for (auto& img : g_outN) img.destroy(dev);
+    g_outN.clear();
+
     if (!g_in0.createFromAHB(dev, phys, in0, extent, format)) return -1;
     if (!g_in1.createFromAHB(dev, phys, in1, extent, format)) return -1;
 
@@ -49,7 +54,7 @@ int32_t createContextFromAHB(
 
 void presentContext(int32_t, int, const std::vector<int>&) {
     if (!g_engine || g_outN.empty()) return;
-    g_engine->recordAndSubmit(g_in0, g_in1, g_outN[0], 0.5f);
+    g_engine->recordAndSubmit(g_in0, g_in1, g_outN.data(), static_cast<uint32_t>(g_outN.size()));
 }
 
 void deleteContext(int32_t) {
