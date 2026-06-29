@@ -4,14 +4,14 @@ namespace seifg {
 
 bool DescriptorPool::init(VkDevice device) {
     VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 48},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 24},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 96},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64},
         {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, 24},
     };
 
     VkDescriptorPoolCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    ci.maxSets = 24;
+    ci.maxSets = 32;
     ci.poolSizeCount = 3;
     ci.pPoolSizes = sizes;
 
