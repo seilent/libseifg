@@ -13,6 +13,7 @@ struct Device {
     uint32_t computeQueueFamily = 0;
     VkResult lastResult = VK_SUCCESS;
     bool hasImageProcessing = false;
+    bool hasFilterCubic = false;
     VkFormat lumaFormat = VK_FORMAT_R16_SFLOAT;
 
     bool init(uint64_t deviceUUID);

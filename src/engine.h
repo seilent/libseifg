@@ -50,10 +50,11 @@ struct Engine {
     uint32_t height = 0;
     int quality = 2;
     bool useQcom = false;
+    bool useCubicWarp = false;
 
     bool init(uint64_t deviceUUID, uint32_t quality);
     void destroy();
-    bool createResources(uint32_t w, uint32_t h);
+    bool createResources(uint32_t w, uint32_t h, VkFormat frameFormat);
     void destroyResources();
     bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut);
 };

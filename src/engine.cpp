@@ -91,7 +91,7 @@ bool Engine::init(uint64_t deviceUUID, uint32_t q) {
     if (!device.init(deviceUUID)) return false;
     VkDevice dev = device.device;
 
-    if (!samplers.init(dev, device.hasImageProcessing)) return false;
+    if (!samplers.init(dev, device.hasImageProcessing, device.hasFilterCubic)) return false;
     if (!commands.init(dev, device.computeQueueFamily)) return false;
     if (!descriptorPool.init(dev)) return false;
 
@@ -123,10 +123,23 @@ bool Engine::init(uint64_t deviceUUID, uint32_t q) {
     return true;
 }
 
-bool Engine::createResources(uint32_t w, uint32_t h) {
+bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
     destroyResources();
     width = w;
     height = h;
+
+    useCubicWarp = false;
+    if (device.hasFilterCubic && samplers.cubic != VK_NULL_HANDLE) {
+        VkFormatProperties3 p3{};
+        p3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+        VkFormatProperties2 p2{};
+        p2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+        p2.pNext = &p3;
+        vkGetPhysicalDeviceFormatProperties2(device.physicalDevice, frameFormat, &p2);
+        if (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT)
+            useCubicWarp = true;
+    }
+
     VkDevice dev = device.device;
     VkPhysicalDevice phys = device.physicalDevice;
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -251,10 +264,10 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     descriptorPool.updateCombinedImageSampler(dev, dsLumaConvert[1], 0, in1.view, samplers.nearest, general);
     descriptorPool.updateStorageImage(dev, dsLumaConvert[1], 1, lumaCurr[0].view, general);
 
-    descriptorPool.updateCombinedImageSampler(dev, dsWarp[0], 0, in0.view, samplers.bilinear, general);
+    descriptorPool.updateCombinedImageSampler(dev, dsWarp[0], 0, in0.view, useCubicWarp ? samplers.cubic : samplers.bilinear, general);
     descriptorPool.updateStorageImage(dev, dsWarp[0], 1, mvFiltered.view, general);
     descriptorPool.updateStorageImage(dev, dsWarp[0], 2, warpedForward.view, general);
-    descriptorPool.updateCombinedImageSampler(dev, dsWarp[1], 0, in1.view, samplers.bilinear, general);
+    descriptorPool.updateCombinedImageSampler(dev, dsWarp[1], 0, in1.view, useCubicWarp ? samplers.cubic : samplers.bilinear, general);
     descriptorPool.updateStorageImage(dev, dsWarp[1], 1, mvBackward.view, general);
     descriptorPool.updateStorageImage(dev, dsWarp[1], 2, warpedBackward.view, general);
 

@@ -89,6 +89,13 @@ bool Device::init(uint64_t deviceUUID) {
             allExts[extCount++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
         else if (strcmp(availExts[i].extensionName, "VK_QCOM_image_processing") == 0)
             hasImageProcessing = true;
+        else if (strcmp(availExts[i].extensionName, "VK_EXT_filter_cubic") == 0 && !hasFilterCubic) {
+            hasFilterCubic = true;
+            allExts[extCount++] = "VK_EXT_filter_cubic";
+        } else if (strcmp(availExts[i].extensionName, "VK_IMG_filter_cubic") == 0 && !hasFilterCubic) {
+            hasFilterCubic = true;
+            allExts[extCount++] = "VK_IMG_filter_cubic";
+        }
     }
     delete[] availExts;
 

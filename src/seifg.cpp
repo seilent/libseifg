@@ -45,7 +45,7 @@ int32_t createContextFromAHB(
             return -1;
     }
 
-    if (!g_engine->createResources(extent.width, extent.height)) return -1;
+    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
 
     g_ctxId = rand();
     return g_ctxId;
