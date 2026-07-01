@@ -30,10 +30,11 @@ void main() {
         for (int dx = -RADIUS; dx <= RADIUS; dx++) {
             float w = exp(-float(dx * dx + dy * dy) / 8.0);
             vec2 q = vec2(coord) + vec2(dx, dy);
-            vec2 quv = (q + 0.5) * invRes;
-            float ix = (texture(currLuma, quv + vec2(invRes.x, 0.0)).r - texture(currLuma, quv - vec2(invRes.x, 0.0)).r) * 0.5;
-            float iy = (texture(currLuma, quv + vec2(0.0, invRes.y)).r - texture(currLuma, quv - vec2(0.0, invRes.y)).r) * 0.5;
-            float ic = texture(currLuma, quv).r;
+            vec4 gA = textureGather(currLuma, q * invRes);
+            vec4 gB = textureGather(currLuma, (q + 1.0) * invRes);
+            float ic = gA.y;
+            float ix = (gB.z - gA.x) * 0.5;
+            float iy = (gB.x - gA.z) * 0.5;
             float ip = texture(prevLuma, (q + g + 0.5) * invRes).r;
             float it = ip - ic;
             Sxx += w * ix * ix; Syy += w * iy * iy; Sxy += w * ix * iy;
