@@ -320,6 +320,56 @@ static void measureFade(AHardwareBuffer* ahb, float bright, uint32_t W, uint32_t
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
+static void fillUiBox(AHardwareBuffer* ahb, int boxX, int boxW, int boxH) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    int cy = (int)d.height / 2;
+    int y0 = cy - boxH / 2, y1 = cy + boxH / 2;
+    for (uint32_t y = 0; y < d.height; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (uint32_t x = 0; x < d.width; x++) {
+            uint8_t bg = pat((int)x, (int)y);
+            bool inBox = ((int)x >= boxX && (int)x < boxX + boxW && (int)y >= y0 && (int)y < y1);
+            uint8_t v = inBox ? 250 : bg;
+            row[x*4+0] = v; row[x*4+1] = v; row[x*4+2] = v; row[x*4+3] = 255;
+        }
+    }
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
+static void measureUiSnap(AHardwareBuffer* ahb, int snapX, int vacatedX, int boxW, int boxH,
+                          uint32_t W, uint32_t H, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    int cy = (int)H / 2, y0 = cy - boxH / 2, y1 = cy + boxH / 2;
+    double snapErr = 0.0; long snapN = 0;
+    double vacGhost = 0.0; long vacN = 0; double vacMax = 0.0;
+    for (int y = y0; y < y1; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (int x = 0; x < (int)W; x++) {
+            bool inSnap = (x >= snapX && x < snapX + boxW);
+            bool inVac = (x >= vacatedX && x < vacatedX + boxW);
+            if (!inSnap && !inVac) continue;
+            int out = row[x * 4];
+            int ideal = inSnap ? 250 : (int)pat(x, y);
+            snapErr += fabs((double)out - ideal); snapN++;
+            if (inVac) {
+                double g = fabs((double)out - (double)pat(x, y));
+                vacGhost += g; vacN++; if (g > vacMax) vacMax = g;
+            }
+        }
+    }
+    printf("%s snapErr=%.1f  vacatedGhost=%.1f  ghostMax=%.0f\n",
+           label, snapN ? snapErr / snapN : 0.0, vacN ? vacGhost / vacN : 0.0, vacMax);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
 int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
@@ -370,6 +420,25 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
         char label[80];
         snprintf(label, sizeof(label), "  t=%d/%d", i + 1, M);
         measureScene(outs[i], boxXt, BOXW, 12, W, H, label);
+    }
+
+    {
+        const int UBW = 150, UBH = 150, JUMP = 220;
+        const int UAX = (int)W / 2 - JUMP / 2 - UBW / 2;
+        const int UBX = UAX + JUMP;
+        fillUiBox(in0, UAX, UBW, UBH);
+        fillUiBox(in1, UBX, UBW, UBH);
+        seifg::presentContext(ctx, -1, {});
+        seifg::waitIdle();
+        printf("-- ui highlight teleport A->B (%dpx box, +%dpx jump, static bg) --\n", UBW, JUMP);
+        for (int i = 0; i < N; i++) {
+            double f = (double)(i + 1) / (double)M;
+            int snapX = (f < 0.5) ? UAX : UBX;
+            int vacX = (f < 0.5) ? UBX : UAX;
+            char label[80];
+            snprintf(label, sizeof(label), "  t=%d/%d", i + 1, M);
+            measureUiSnap(outs[i], snapX, vacX, UBW, UBH, W, H, label);
+        }
     }
 
     fillGrid(in0, 0);
