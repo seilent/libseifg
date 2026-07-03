@@ -114,6 +114,33 @@ static void measure(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H, 
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
+static void measureEdgeBands(AHardwareBuffer* ahb, int refShift, uint32_t W, uint32_t H,
+                             int bandW, const char* label) {
+    AHardwareBuffer_Desc d{};
+    AHardwareBuffer_describe(ahb, &d);
+    void* ptr = nullptr;
+    AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ptr);
+    auto* base = static_cast<uint8_t*>(ptr);
+    double leadErr = 0.0; long leadN = 0;
+    double trailErr = 0.0; long trailN = 0;
+    for (uint32_t y = 0; y < H; y++) {
+        uint8_t* row = base + (size_t)y * d.stride * 4;
+        for (int x = (int)W - bandW; x < (int)W; x++) {
+            int outv = row[x * 4];
+            int ref = pat(x - refShift, (int)y);
+            leadErr += fabs((double)outv - ref); leadN++;
+        }
+        for (int x = 0; x < bandW; x++) {
+            int outv = row[x * 4];
+            int ref = pat(x - refShift, (int)y);
+            trailErr += fabs((double)outv - ref); trailN++;
+        }
+    }
+    printf("%s: scrollEdge=%.1f  trailingEdge=%.1f  (band=%dpx)\n",
+           label, leadN ? leadErr / leadN : 0.0, trailN ? trailErr / trailN : 0.0, bandW);
+    AHardwareBuffer_unlock(ahb, nullptr);
+}
+
 static void fillScene(AHardwareBuffer* ahb, int boxX, int boxW) {
     AHardwareBuffer_Desc d{};
     AHardwareBuffer_describe(ahb, &d);
@@ -370,7 +397,8 @@ static void measureUiSnap(AHardwareBuffer* ahb, int snapX, int vacatedX, int box
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
-int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
+int main(int argc, char** argv) {
+    const uint32_t W = 1280, H = 720;
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
     const uint32_t quality = (argc > 3) ? (uint32_t)atoi(argv[3]) : 2;
@@ -385,8 +413,9 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     for (auto* o : outs) if (!o) { printf("FAIL: out alloc\n"); return 1; }
 
     fillShifted(in0, 0);
-    fillShifted(in1, 2 * SHIFT);
-    printf("=== multiplier %dx, quality %u, pan +%dpx ===\n", M, quality, 2 * SHIFT);
+    fillShifted(in1, -2 * SHIFT);
+    printf("=== multiplier %dx, quality %u, pan right +%dpx (leading edge = right) ===\n",
+           M, quality, 2 * SHIFT);
 
     seifg::initialize(0, false, quality, (uint64_t)M, {});
     int32_t ctx = seifg::createContextFromAHB(in0, in1, outs, VkExtent2D{W, H},
@@ -398,7 +427,8 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
         int ideal = (int)lround(2.0 * SHIFT * (i + 1) / (double)M);
         char label[64];
         snprintf(label, sizeof(label), "t=%d/%d ideal+%dpx", i + 1, M, ideal);
-        measure(outs[i], ideal, W, H, label);
+        measure(outs[i], -ideal, W, H, label);
+        measureEdgeBands(outs[i], -ideal, W, H, 2 * SHIFT, label);
     }
 
     fillShifted(in0, 0);
@@ -499,7 +529,7 @@ int main(int argc, char** argv) {    const uint32_t W = 1280, H = 720;
     }
 
     fillShifted(in0, 0);
-    fillShifted(in1, 2 * SHIFT);
+    fillShifted(in1, -2 * SHIFT);
     const int FRAMES = 120;
     struct timespec t0{}, t1{};
     clock_gettime(CLOCK_MONOTONIC, &t0);

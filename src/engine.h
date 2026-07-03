@@ -20,6 +20,7 @@ struct Engine {
 
     Pipeline lumaConvertPipeline;
     Pipeline pyramidDownsamplePipeline;
+    Pipeline gradProductPipeline;
     Pipeline blockMatchCoarsePipeline;
     Pipeline refineLevelPipeline;
     Pipeline flowFilterPipeline;
@@ -29,6 +30,7 @@ struct Engine {
 
     Image lumaPrev[PYRAMID_LEVELS];
     Image lumaCurr[PYRAMID_LEVELS];
+    Image gradImg[PYRAMID_LEVELS];
     Image mvCoarse;
     Image mvRefined[PYRAMID_LEVELS - 1];
     Image mvFiltered;
@@ -39,6 +41,7 @@ struct Engine {
 
     VkDescriptorSet dsLumaConvert[2]{};
     VkDescriptorSet dsPyramid[2 * (PYRAMID_LEVELS - 1)]{};
+    VkDescriptorSet dsGradProduct[PYRAMID_LEVELS]{};
     VkDescriptorSet dsBlockMatch{};
     VkDescriptorSet dsRefine[PYRAMID_LEVELS - 1]{};
     VkDescriptorSet dsFlowFilter{};

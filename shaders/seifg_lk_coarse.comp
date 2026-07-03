@@ -3,7 +3,7 @@
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D prevLuma;
-layout(set = 0, binding = 1) uniform sampler2D currLuma;
+layout(set = 0, binding = 1) uniform sampler2D gradImg;
 layout(set = 0, binding = 2, rg16f) uniform writeonly image2D flowOut;
 
 layout(push_constant) uniform PushConstants {
@@ -16,29 +16,30 @@ layout(push_constant) uniform PushConstants {
     uint _pad;
 } pc;
 
-layout(constant_id = 0) const int RADIUS = 3;
-
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.resolution.x) || coord.y >= int(pc.resolution.y)) return;
 
     vec2 invRes = 1.0 / vec2(pc.resolution);
-    vec2 g = vec2(0.0);
 
-    float Sxx = 0.0, Syy = 0.0, Sxy = 0.0, Sxt = 0.0, Syt = 0.0;
-    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
-        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+    float Sxx = 0.0, Sxy = 0.0, Syy = 0.0;
+    float Sxt = 0.0, Syt = 0.0;
+    for (int dy = -3; dy <= 3; dy++) {
+        for (int dx = -3; dx <= 3; dx++) {
             float w = exp(-float(dx * dx + dy * dy) / 8.0);
-            vec2 q = vec2(coord) + vec2(dx, dy);
-            vec4 gA = textureGather(currLuma, q * invRes);
-            vec4 gB = textureGather(currLuma, (q + 1.0) * invRes);
-            float ic = gA.y;
-            float ix = (gB.z - gA.x) * 0.5;
-            float iy = (gB.x - gA.z) * 0.5;
-            float ip = texture(prevLuma, (q + g + 0.5) * invRes).r;
+            ivec2 q = coord + ivec2(dx, dy);
+            ivec2 cq = clamp(q, ivec2(0), ivec2(pc.resolution) - 1);
+            vec4 grad = texelFetch(gradImg, cq, 0);
+            float ix = grad.r;
+            float iy = grad.g;
+            float ic = grad.b;
+            float ip = texture(prevLuma, (vec2(q) + 0.5) * invRes).r;
             float it = ip - ic;
-            Sxx += w * ix * ix; Syy += w * iy * iy; Sxy += w * ix * iy;
-            Sxt += w * ix * it; Syt += w * iy * it;
+            Sxx += w * ix * ix;
+            Sxy += w * ix * iy;
+            Syy += w * iy * iy;
+            Sxt += w * ix * it;
+            Syt += w * iy * it;
         }
     }
 
@@ -50,5 +51,5 @@ void main() {
     }
     d = clamp(d, vec2(-8.0), vec2(8.0));
 
-    imageStore(flowOut, coord, vec4(g + d, 0.0, 0.0));
+    imageStore(flowOut, coord, vec4(d, 0.0, 0.0));
 }

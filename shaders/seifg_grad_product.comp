@@ -1,0 +1,31 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D currLuma;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D gradImg;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 resolution;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint _pad;
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.resolution.x) || coord.y >= int(pc.resolution.y)) return;
+
+    vec2 invRes = 1.0 / vec2(pc.resolution);
+    vec2 q = vec2(coord);
+    vec4 gA = textureGather(currLuma, q * invRes);
+    vec4 gB = textureGather(currLuma, (q + 1.0) * invRes);
+    float ic = gA.y;
+    float ix = (gB.z - gA.x) * 0.5;
+    float iy = (gB.x - gA.z) * 0.5;
+
+    imageStore(gradImg, coord, vec4(ix, iy, ic, 0.0));
+}
