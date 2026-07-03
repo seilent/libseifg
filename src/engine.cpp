@@ -76,10 +76,8 @@ static bool initPipeline(Pipeline& p, VkDevice dev, const uint8_t* spv, size_t s
 }
 
 bool Engine::init(uint64_t deviceUUID, uint32_t q) {
-    quality = (int)q;
-    if (quality < 0) quality = 0;
-    if (quality > 2) quality = 2;
-    int iters = quality + 1;
+    quality = 0;
+    int iters = 1;
     int32_t refineSpecData[1] = { iters };
     VkSpecializationMapEntry refineEntry[1] = {{0, 0, sizeof(int32_t)}};
     VkSpecializationInfo refineSpec{1, refineEntry, sizeof(refineSpecData), refineSpecData};
