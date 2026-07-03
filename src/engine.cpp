@@ -154,13 +154,13 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
         if (!lumaCurr[i].createInternal(dev, phys, VK_FORMAT_R16_SFLOAT, lw, lh, lumaUsage)) return false;
     }
 
-    uint32_t cw = w >> 4;
-    uint32_t ch = h >> 4;
+    uint32_t cw = w >> (PYRAMID_LEVELS - 1);
+    uint32_t ch = h >> (PYRAMID_LEVELS - 1);
     if (!mvCoarse.createInternal(dev, phys, VK_FORMAT_R16G16_SFLOAT, cw, ch, usage)) return false;
 
     for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
-        uint32_t rw = w >> (3 - i);
-        uint32_t rh = h >> (3 - i);
+        uint32_t rw = w >> ((PYRAMID_LEVELS - 2) - i);
+        uint32_t rh = h >> ((PYRAMID_LEVELS - 2) - i);
         if (!mvRefined[i].createInternal(dev, phys, VK_FORMAT_R16G16_SFLOAT, rw, rh, usage)) return false;
     }
 
@@ -177,12 +177,12 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
         if (!pool.allocate(dev, lumaConvertPipeline.descriptorSetLayout, &dsLumaConvert[i])) return false;
     }
 
-    for (uint32_t i = 0; i < 8; i++) {
+    for (uint32_t i = 0; i < 2 * (PYRAMID_LEVELS - 1); i++) {
         if (!pool.allocate(dev, pyramidDownsamplePipeline.descriptorSetLayout, &dsPyramid[i])) return false;
     }
 
     if (!pool.allocate(dev, blockMatchCoarsePipeline.descriptorSetLayout, &dsBlockMatch)) return false;
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
         if (!pool.allocate(dev, refineLevelPipeline.descriptorSetLayout, &dsRefine[i])) return false;
     }
     if (!pool.allocate(dev, flowFilterPipeline.descriptorSetLayout, &dsFlowFilter)) return false;
@@ -195,28 +195,27 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
         if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend[i])) return false;
     }
 
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
         uint32_t src = i;
         uint32_t dst = i + 1;
         pool.updateCombinedImageSampler(dev, dsPyramid[i], 0, lumaPrev[src].view, samplers.bilinear, general);
         pool.updateStorageImage(dev, dsPyramid[i], 1, lumaPrev[dst].view, general);
-        pool.updateCombinedImageSampler(dev, dsPyramid[i + 4], 0, lumaCurr[src].view, samplers.bilinear, general);
-        pool.updateStorageImage(dev, dsPyramid[i + 4], 1, lumaCurr[dst].view, general);
+        pool.updateCombinedImageSampler(dev, dsPyramid[i + (PYRAMID_LEVELS - 1)], 0, lumaCurr[src].view, samplers.bilinear, general);
+        pool.updateStorageImage(dev, dsPyramid[i + (PYRAMID_LEVELS - 1)], 1, lumaCurr[dst].view, general);
     }
 
     if (useQcom) {
-        pool.updateBlockMatchImage(dev, dsBlockMatch, 0, lumaPrev[4].view, samplers.unnormalized, general);
-        pool.updateBlockMatchImage(dev, dsBlockMatch, 1, lumaCurr[4].view, samplers.unnormalized, general);
+        pool.updateBlockMatchImage(dev, dsBlockMatch, 0, lumaPrev[PYRAMID_LEVELS - 1].view, samplers.unnormalized, general);
+        pool.updateBlockMatchImage(dev, dsBlockMatch, 1, lumaCurr[PYRAMID_LEVELS - 1].view, samplers.unnormalized, general);
     } else {
-        pool.updateCombinedImageSampler(dev, dsBlockMatch, 0, lumaPrev[4].view, samplers.bilinear, general);
-        pool.updateCombinedImageSampler(dev, dsBlockMatch, 1, lumaCurr[4].view, samplers.bilinear, general);
+        pool.updateCombinedImageSampler(dev, dsBlockMatch, 0, lumaPrev[PYRAMID_LEVELS - 1].view, samplers.bilinear, general);
+        pool.updateCombinedImageSampler(dev, dsBlockMatch, 1, lumaCurr[PYRAMID_LEVELS - 1].view, samplers.bilinear, general);
     }
     pool.updateStorageImage(dev, dsBlockMatch, 2, mvCoarse.view, general);
 
-    for (uint32_t i = 0; i < 4; i++) {
-        uint32_t prevLevel = (i == 0) ? 4 : 3 - (i - 1);
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
         Image& prevMv = (i == 0) ? mvCoarse : mvRefined[i - 1];
-        uint32_t pyrLevel = 3 - i;
+        uint32_t pyrLevel = (PYRAMID_LEVELS - 2) - i;
         if (useQcom) {
             pool.updateStorageImage(dev, dsRefine[i], 0, prevMv.view, general);
             pool.updateBlockMatchImage(dev, dsRefine[i], 1, lumaPrev[pyrLevel].view, samplers.unnormalized, general);
@@ -229,7 +228,7 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
         pool.updateStorageImage(dev, dsRefine[i], 3, mvRefined[i].view, general);
     }
 
-    pool.updateStorageImage(dev, dsFlowFilter, 0, mvRefined[3].view, general);
+    pool.updateStorageImage(dev, dsFlowFilter, 0, mvRefined[PYRAMID_LEVELS - 2].view, general);
     pool.updateStorageImage(dev, dsFlowFilter, 1, mvFiltered.view, general);
     pool.updateStorageImage(dev, dsFlowFilter, 2, mvBackward.view, general);
 
@@ -297,30 +296,30 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     VkImage lumaL0s[] = {lumaPrev[0].image, lumaCurr[0].image};
     barrierMulti(cmd, lumaL0s, 2);
 
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
         uint32_t lw = width >> (i + 1);
         uint32_t lh = height >> (i + 1);
         pc.width = lw;
         pc.height = lh;
         pc.level = i + 1;
         dispatch(pyramidDownsamplePipeline, dsPyramid[i], lw, lh);
-        dispatch(pyramidDownsamplePipeline, dsPyramid[i + 4], lw, lh);
+        dispatch(pyramidDownsamplePipeline, dsPyramid[i + (PYRAMID_LEVELS - 1)], lw, lh);
         VkImage levelImgs[] = {lumaPrev[i + 1].image, lumaCurr[i + 1].image};
         barrierMulti(cmd, levelImgs, 2);
     }
 
-    pc.width = width >> 4;
-    pc.height = height >> 4;
-    pc.level = 4;
+    pc.width = width >> (PYRAMID_LEVELS - 1);
+    pc.height = height >> (PYRAMID_LEVELS - 1);
+    pc.level = PYRAMID_LEVELS - 1;
     dispatch(blockMatchCoarsePipeline, dsBlockMatch, pc.width, pc.height);
     barrier(cmd, mvCoarse.image);
 
-    for (uint32_t i = 0; i < 4; i++) {
-        uint32_t rw = width >> (3 - i);
-        uint32_t rh = height >> (3 - i);
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
+        uint32_t rw = width >> ((PYRAMID_LEVELS - 2) - i);
+        uint32_t rh = height >> ((PYRAMID_LEVELS - 2) - i);
         pc.width = rw;
         pc.height = rh;
-        pc.level = 3 - i;
+        pc.level = (PYRAMID_LEVELS - 2) - i;
         dispatch(refineLevelPipeline, dsRefine[i], rw, rh);
         barrier(cmd, mvRefined[i].image);
     }

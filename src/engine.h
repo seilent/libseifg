@@ -9,7 +9,7 @@
 
 namespace seifg {
 
-static constexpr uint32_t PYRAMID_LEVELS = 5;
+static constexpr uint32_t PYRAMID_LEVELS = 6;
 static constexpr uint32_t MAX_OUTPUTS = 3;
 
 struct Engine {
@@ -38,9 +38,9 @@ struct Engine {
     Image warpedBackward;
 
     VkDescriptorSet dsLumaConvert[2]{};
-    VkDescriptorSet dsPyramid[8]{};
+    VkDescriptorSet dsPyramid[2 * (PYRAMID_LEVELS - 1)]{};
     VkDescriptorSet dsBlockMatch{};
-    VkDescriptorSet dsRefine[4]{};
+    VkDescriptorSet dsRefine[PYRAMID_LEVELS - 1]{};
     VkDescriptorSet dsFlowFilter{};
     VkDescriptorSet dsOcclusion{};
     VkDescriptorSet dsWarp[2]{};
