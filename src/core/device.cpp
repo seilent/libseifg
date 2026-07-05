@@ -62,20 +62,27 @@ bool Device::init(uint64_t deviceUUID) {
     queueCI.queueCount = 1;
     queueCI.pQueuePriorities = &priority;
 
-    const char* requiredExts[] = {
-        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
-        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-        VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
-        VK_KHR_MAINTENANCE1_EXTENSION_NAME,
-        VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-    };
-    uint32_t extCount = 8;
+    const char* allExts[24];
+    uint32_t extCount = 0;
 
-    const char* allExts[16];
-    memcpy(allExts, requiredExts, sizeof(requiredExts));
+#ifdef __ANDROID__
+    allExts[extCount++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_BIND_MEMORY_2_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_MAINTENANCE1_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+#elif defined(__linux__)
+    allExts[extCount++] = VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME;
+    allExts[extCount++] = VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME;
+#endif
 
     uint32_t availExtCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &availExtCount, nullptr);
@@ -130,6 +137,16 @@ bool Device::init(uint64_t deviceUUID) {
     ipFeatures.textureBlockMatch = VK_TRUE;
     if (hasImageProcessing)
         fp16Features.pNext = &ipFeatures;
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures{};
+    timelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineFeatures.timelineSemaphore = VK_TRUE;
+    if (hasImageProcessing)
+        ipFeatures.pNext = &timelineFeatures;
+    else
+        fp16Features.pNext = &timelineFeatures;
+#endif
 
     VkDeviceCreateInfo deviceCI{};
     deviceCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

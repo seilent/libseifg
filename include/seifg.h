@@ -23,14 +23,32 @@ int32_t createContextFromAHB(
     VkExtent2D extent, VkFormat format);
 #endif
 
+int32_t createContextFromImages(
+    VkImage in0, VkImage in1,
+    const std::vector<VkImage>& outN,
+    VkExtent2D extent, VkFormat format);
+
 void presentContext(int32_t id, int inSem, const std::vector<int>& outSem);
 
 void deleteContext(int32_t id);
 
 void finalize();
 
+VkDevice getDevice();
+VkPhysicalDevice getPhysicalDevice();
+
 #ifdef __ANDROID__
 void waitIdle();
+#endif
+
+#if defined(__linux__) && !defined(__ANDROID__)
+int32_t createContextFromFd(int in0Fd, int in1Fd,
+    const std::vector<int>& outFds,
+    VkExtent2D extent, VkFormat format);
+
+bool importTimelineSemaphore(int syncFd);
+
+void presentContextTimeline(int32_t id, uint64_t waitValue, uint64_t signalValue);
 #endif
 
 }

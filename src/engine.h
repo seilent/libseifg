@@ -60,6 +60,15 @@ struct Engine {
     bool createResources(uint32_t w, uint32_t h, VkFormat frameFormat);
     void destroyResources();
     bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut);
+    bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut,
+                         VkSemaphore timelineSem, uint64_t waitValue, uint64_t signalValue);
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    VkSemaphore importedTimeline = VK_NULL_HANDLE;
+    uint64_t timelineValue = 0;
+    bool importTimelineSemaphore(int fd);
+    void destroyTimelineSemaphore();
+#endif
 };
 
 }

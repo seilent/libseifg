@@ -52,6 +52,34 @@ int32_t createContextFromAHB(
 }
 #endif
 
+int32_t createContextFromImages(
+    VkImage in0, VkImage in1,
+    const std::vector<VkImage>& outN,
+    VkExtent2D extent, VkFormat format) {
+    if (!g_engine) return -1;
+
+    VkDevice dev = g_engine->device.device;
+
+    g_in0.destroy(dev);
+    g_in1.destroy(dev);
+    for (auto& img : g_outN) img.destroy(dev);
+    g_outN.clear();
+
+    if (!g_in0.wrapExternal(dev, in0, extent, format)) return -1;
+    if (!g_in1.wrapExternal(dev, in1, extent, format)) return -1;
+
+    g_outN.resize(outN.size());
+    for (size_t i = 0; i < outN.size(); ++i) {
+        if (!g_outN[i].wrapExternal(dev, outN[i], extent, format))
+            return -1;
+    }
+
+    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
+
+    g_ctxId = rand();
+    return g_ctxId;
+}
+
 void presentContext(int32_t, int, const std::vector<int>&) {
     if (!g_engine || g_outN.empty()) return;
     g_engine->recordAndSubmit(g_in0, g_in1, g_outN.data(), static_cast<uint32_t>(g_outN.size()));
@@ -73,10 +101,69 @@ void finalize() {
     g_engine = nullptr;
 }
 
+VkDevice getDevice() {
+    return g_engine ? g_engine->device.device : VK_NULL_HANDLE;
+}
+
+VkPhysicalDevice getPhysicalDevice() {
+    return g_engine ? g_engine->device.physicalDevice : VK_NULL_HANDLE;
+}
+
 #ifdef __ANDROID__
 void waitIdle() {
     if (!g_engine) return;
     vkDeviceWaitIdle(g_engine->device.device);
+}
+#endif
+
+#if defined(__linux__) && !defined(__ANDROID__)
+int32_t createContextFromFd(int in0Fd, int in1Fd,
+    const std::vector<int>& outFds,
+    VkExtent2D extent, VkFormat format) {
+    if (!g_engine) return -1;
+
+    VkDevice dev = g_engine->device.device;
+    VkPhysicalDevice phys = g_engine->device.physicalDevice;
+    VkImageUsageFlags srcUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageUsageFlags dstUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    g_in0.destroy(dev);
+    g_in1.destroy(dev);
+    for (auto& img : g_outN) img.destroy(dev);
+    g_outN.clear();
+
+    if (!g_in0.createFromFd(dev, phys, in0Fd, extent, format, srcUsage)) return -1;
+    if (!g_in1.createFromFd(dev, phys, in1Fd, extent, format, srcUsage)) {
+        g_in0.destroy(dev);
+        return -1;
+    }
+
+    g_outN.resize(outFds.size());
+    for (size_t i = 0; i < outFds.size(); ++i) {
+        if (!g_outN[i].createFromFd(dev, phys, outFds[i], extent, format, dstUsage)) {
+            g_in0.destroy(dev);
+            g_in1.destroy(dev);
+            for (size_t j = 0; j < i; ++j) g_outN[j].destroy(dev);
+            g_outN.clear();
+            return -1;
+        }
+    }
+
+    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
+
+    g_ctxId = rand();
+    return g_ctxId;
+}
+
+bool importTimelineSemaphore(int syncFd) {
+    if (!g_engine) return false;
+    return g_engine->importTimelineSemaphore(syncFd);
+}
+
+void presentContextTimeline(int32_t, uint64_t waitValue, uint64_t signalValue) {
+    if (!g_engine || g_outN.empty()) return;
+    g_engine->recordAndSubmit(g_in0, g_in1, g_outN.data(), static_cast<uint32_t>(g_outN.size()),
+                              g_engine->importedTimeline, waitValue, signalValue);
 }
 #endif
 

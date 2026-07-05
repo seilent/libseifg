@@ -14,10 +14,12 @@ static bool createView(VkDevice device, VkImage image, VkFormat format, VkImageV
     return vkCreateImageView(device, &ci, nullptr, view) == VK_SUCCESS;
 }
 
+#ifdef __ANDROID__
 bool Image::createFromAHB(VkDevice device, VkPhysicalDevice physDev, AHardwareBuffer* ahb,
                            VkExtent2D ext, VkFormat fmt) {
     extent = ext;
     format = fmt;
+    ownsImage = true;
 
     VkAndroidHardwareBufferFormatPropertiesANDROID fmtProps{};
     fmtProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
@@ -80,11 +82,97 @@ bool Image::createFromAHB(VkDevice device, VkPhysicalDevice physDev, AHardwareBu
 
     return createView(device, image, format, &view);
 }
+#endif
+
+#if defined(__linux__) && !defined(__ANDROID__)
+bool Image::createFromFd(VkDevice device, VkPhysicalDevice physDev, int fd,
+                          VkExtent2D ext, VkFormat fmt, VkImageUsageFlags usage) {
+    extent = ext;
+    format = fmt;
+    ownsImage = true;
+
+    VkExternalMemoryImageCreateInfo extMemCI{};
+    extMemCI.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    extMemCI.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+
+    VkImageCreateInfo imageCI{};
+    imageCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCI.pNext = &extMemCI;
+    imageCI.imageType = VK_IMAGE_TYPE_2D;
+    imageCI.format = fmt;
+    imageCI.extent = {ext.width, ext.height, 1};
+    imageCI.mipLevels = 1;
+    imageCI.arrayLayers = 1;
+    imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCI.usage = usage;
+    imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    lastResult = vkCreateImage(device, &imageCI, nullptr, &image);
+    if (lastResult != VK_SUCCESS) return false;
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(device, image, &memReqs);
+
+    VkImportMemoryFdInfoKHR importFdInfo{};
+    importFdInfo.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+    importFdInfo.fd = fd;
+
+    VkMemoryDedicatedAllocateInfo dedicatedInfo{};
+    dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicatedInfo.pNext = &importFdInfo;
+    dedicatedInfo.image = image;
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physDev, &memProps);
+    uint32_t memIndex = 0;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if (memReqs.memoryTypeBits & (1u << i)) {
+            memIndex = i;
+            break;
+        }
+    }
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.pNext = &dedicatedInfo;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = memIndex;
+
+    lastResult = vkAllocateMemory(device, &allocInfo, nullptr, &memory);
+    if (lastResult != VK_SUCCESS) {
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    lastResult = vkBindImageMemory(device, image, memory, 0);
+    if (lastResult != VK_SUCCESS) {
+        vkFreeMemory(device, memory, nullptr);
+        memory = VK_NULL_HANDLE;
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    if (!createView(device, image, format, &view)) {
+        vkFreeMemory(device, memory, nullptr);
+        memory = VK_NULL_HANDLE;
+        vkDestroyImage(device, image, nullptr);
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+#endif
 
 bool Image::createInternal(VkDevice device, VkPhysicalDevice physDev,
                             VkFormat fmt, uint32_t width, uint32_t height, VkImageUsageFlags usage) {
     extent = {width, height};
     format = fmt;
+    ownsImage = true;
 
     VkImageCreateInfo imageCI{};
     imageCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -130,10 +218,24 @@ bool Image::createInternal(VkDevice device, VkPhysicalDevice physDev,
     return createView(device, image, format, &view);
 }
 
+bool Image::wrapExternal(VkDevice device, VkImage img, VkExtent2D ext, VkFormat fmt) {
+    extent = ext;
+    format = fmt;
+    image = img;
+    ownsImage = false;
+    memory = VK_NULL_HANDLE;
+    return createView(device, image, format, &view);
+}
+
 void Image::destroy(VkDevice device) {
     if (view) { vkDestroyImageView(device, view, nullptr); view = VK_NULL_HANDLE; }
-    if (image) { vkDestroyImage(device, image, nullptr); image = VK_NULL_HANDLE; }
-    if (memory) { vkFreeMemory(device, memory, nullptr); memory = VK_NULL_HANDLE; }
+    if (ownsImage) {
+        if (image) { vkDestroyImage(device, image, nullptr); image = VK_NULL_HANDLE; }
+        if (memory) { vkFreeMemory(device, memory, nullptr); memory = VK_NULL_HANDLE; }
+    } else {
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+    }
 }
 
 }

@@ -17,6 +17,8 @@ struct CommandRing {
     bool init(VkDevice device, uint32_t queueFamily);
     VkCommandBuffer acquire(VkDevice device);
     bool submit(VkDevice device, VkQueue queue);
+    bool submit(VkDevice device, VkQueue queue,
+                VkSemaphore timelineSem, uint64_t waitValue, uint64_t signalValue);
     void destroy(VkDevice device);
 };
 

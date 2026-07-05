@@ -59,6 +59,36 @@ bool CommandRing::submit(VkDevice device, VkQueue queue) {
     return lastResult == VK_SUCCESS;
 }
 
+bool CommandRing::submit(VkDevice device, VkQueue queue,
+                         VkSemaphore timelineSem, uint64_t waitValue, uint64_t signalValue) {
+    lastResult = vkEndCommandBuffer(buffers[index]);
+    if (lastResult != VK_SUCCESS) return false;
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount = 1;
+    timelineInfo.pWaitSemaphoreValues = &waitValue;
+    timelineInfo.signalSemaphoreValueCount = 1;
+    timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineInfo;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &timelineSem;
+    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &buffers[index];
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &timelineSem;
+
+    lastResult = vkQueueSubmit(queue, 1, &submitInfo, fences[index]);
+    index = (index + 1) % RING_SIZE;
+    return lastResult == VK_SUCCESS;
+}
+
 void CommandRing::destroy(VkDevice device) {
     for (uint32_t i = 0; i < RING_SIZE; i++) {
         if (fences[i]) { vkDestroyFence(device, fences[i], nullptr); fences[i] = VK_NULL_HANDLE; }

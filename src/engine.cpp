@@ -373,6 +373,167 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     return commands.submit(dev, device.computeQueue);
 }
 
+bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut,
+                             VkSemaphore timelineSem, uint64_t waitValue, uint64_t signalValue) {
+    if (numOut == 0) return false;
+    if (numOut > MAX_OUTPUTS) numOut = MAX_OUTPUTS;
+    VkDevice dev = device.device;
+    VkCommandBuffer cmd = commands.acquire(dev);
+    VkImageLayout general = VK_IMAGE_LAYOUT_GENERAL;
+    uint32_t qf = device.computeQueueFamily;
+
+    externalAcquire(cmd, in0.image, qf);
+    externalAcquire(cmd, in1.image, qf);
+    for (uint32_t i = 0; i < numOut; i++)
+        externalAcquire(cmd, outs[i].image, qf);
+
+    descriptorPool.updateCombinedImageSampler(dev, dsLumaConvert[0], 0, in0.view, samplers.nearest, general);
+    descriptorPool.updateStorageImage(dev, dsLumaConvert[0], 1, lumaPrev[0].view, general);
+    descriptorPool.updateCombinedImageSampler(dev, dsLumaConvert[1], 0, in1.view, samplers.nearest, general);
+    descriptorPool.updateStorageImage(dev, dsLumaConvert[1], 1, lumaCurr[0].view, general);
+
+    descriptorPool.updateCombinedImageSampler(dev, dsWarp[0], 0, in0.view, useCubicWarp ? samplers.cubic : samplers.bilinear, general);
+    descriptorPool.updateStorageImage(dev, dsWarp[0], 1, mvFiltered.view, general);
+    descriptorPool.updateStorageImage(dev, dsWarp[0], 2, warpedForward.view, general);
+    descriptorPool.updateCombinedImageSampler(dev, dsWarp[1], 0, in1.view, useCubicWarp ? samplers.cubic : samplers.bilinear, general);
+    descriptorPool.updateStorageImage(dev, dsWarp[1], 1, mvBackward.view, general);
+    descriptorPool.updateStorageImage(dev, dsWarp[1], 2, warpedBackward.view, general);
+
+    for (uint32_t i = 0; i < numOut; i++) {
+        descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 3, in0.view, samplers.bilinear, general);
+        descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 4, in1.view, samplers.bilinear, general);
+        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, outs[i].view, general);
+    }
+
+    SeifgPushConstants pc{};
+    pc.width = width;
+    pc.height = height;
+    pc.flowScale = 0.0f;
+    pc.threshold = 4.0f;
+    pc.temperature = 5.0f;
+
+    auto dispatch = [&](Pipeline& p, VkDescriptorSet ds, uint32_t dw, uint32_t dh) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipelineLayout, 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, p.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (dw + 15) / 16, (dh + 15) / 16, 1);
+    };
+
+    dispatch(lumaConvertPipeline, dsLumaConvert[0], width, height);
+    dispatch(lumaConvertPipeline, dsLumaConvert[1], width, height);
+
+    VkImage lumaL0s[] = {lumaPrev[0].image, lumaCurr[0].image};
+    barrierMulti(cmd, lumaL0s, 2);
+
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
+        uint32_t lw = width >> (i + 1);
+        uint32_t lh = height >> (i + 1);
+        pc.width = lw;
+        pc.height = lh;
+        pc.level = i + 1;
+        dispatch(pyramidDownsamplePipeline, dsPyramid[i], lw, lh);
+        dispatch(pyramidDownsamplePipeline, dsPyramid[i + (PYRAMID_LEVELS - 1)], lw, lh);
+        VkImage levelImgs[] = {lumaPrev[i + 1].image, lumaCurr[i + 1].image};
+        barrierMulti(cmd, levelImgs, 2);
+    }
+
+    for (uint32_t i = 0; i < PYRAMID_LEVELS; i++) {
+        uint32_t gw = width >> i;
+        uint32_t gh = height >> i;
+        pc.width = gw;
+        pc.height = gh;
+        pc.level = i;
+        dispatch(gradProductPipeline, dsGradProduct[i], gw, gh);
+        barrier(cmd, gradImg[i].image);
+    }
+
+    pc.width = width >> (PYRAMID_LEVELS - 1);
+    pc.height = height >> (PYRAMID_LEVELS - 1);
+    pc.level = PYRAMID_LEVELS - 1;
+    dispatch(blockMatchCoarsePipeline, dsBlockMatch, pc.width, pc.height);
+    barrier(cmd, mvCoarse.image);
+
+    for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
+        uint32_t rw = width >> ((PYRAMID_LEVELS - 2) - i);
+        uint32_t rh = height >> ((PYRAMID_LEVELS - 2) - i);
+        pc.width = rw;
+        pc.height = rh;
+        pc.level = (PYRAMID_LEVELS - 2) - i;
+        dispatch(refineLevelPipeline, dsRefine[i], rw, rh);
+        barrier(cmd, mvRefined[i].image);
+    }
+
+    pc.width = width;
+    pc.height = height;
+    pc.level = 0;
+    dispatch(flowFilterPipeline, dsFlowFilter, width, height);
+
+    VkImage filterOut[] = {mvFiltered.image, mvBackward.image};
+    barrierMulti(cmd, filterOut, 2);
+
+    dispatch(occlusionPipeline, dsOcclusion, width, height);
+    barrier(cmd, confidence.image);
+
+    VkImage warpOut[] = {warpedForward.image, warpedBackward.image};
+    for (uint32_t i = 0; i < numOut; i++) {
+        float ti = (float)(i + 1) / (float)(numOut + 1);
+        pc.t = ti;
+        dispatch(warpPipeline, dsWarp[0], width, height);
+        pc.t = 1.0f - ti;
+        dispatch(warpPipeline, dsWarp[1], width, height);
+        pc.t = ti;
+        barrierMulti(cmd, warpOut, 2);
+        dispatch(blendPipeline, dsBlend[i], width, height);
+        barrier(cmd, outs[i].image);
+    }
+
+    externalRelease(cmd, in0.image, qf);
+    externalRelease(cmd, in1.image, qf);
+    for (uint32_t i = 0; i < numOut; i++)
+        externalRelease(cmd, outs[i].image, qf);
+
+    return commands.submit(dev, device.computeQueue, timelineSem, waitValue, signalValue);
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+bool Engine::importTimelineSemaphore(int fd) {
+    VkSemaphoreTypeCreateInfo typeInfo{};
+    typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    typeInfo.initialValue = 0;
+
+    VkSemaphoreCreateInfo semCI{};
+    semCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semCI.pNext = &typeInfo;
+
+    if (vkCreateSemaphore(device.device, &semCI, nullptr, &importedTimeline) != VK_SUCCESS)
+        return false;
+
+    VkImportSemaphoreFdInfoKHR importInfo{};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+    importInfo.semaphore = importedTimeline;
+    importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    importInfo.fd = fd;
+
+    if (vkImportSemaphoreFdKHR(device.device, &importInfo) != VK_SUCCESS) {
+        vkDestroySemaphore(device.device, importedTimeline, nullptr);
+        importedTimeline = VK_NULL_HANDLE;
+        return false;
+    }
+
+    timelineValue = 0;
+    return true;
+}
+
+void Engine::destroyTimelineSemaphore() {
+    if (importedTimeline != VK_NULL_HANDLE) {
+        vkDestroySemaphore(device.device, importedTimeline, nullptr);
+        importedTimeline = VK_NULL_HANDLE;
+    }
+    timelineValue = 0;
+}
+#endif
+
 void Engine::destroyResources() {
     VkDevice dev = device.device;
     for (uint32_t i = 0; i < PYRAMID_LEVELS; i++) {
@@ -397,6 +558,9 @@ void Engine::destroy() {
     if (!dev) return;
     vkDeviceWaitIdle(dev);
     destroyResources();
+#if defined(__linux__) && !defined(__ANDROID__)
+    destroyTimelineSemaphore();
+#endif
     lumaConvertPipeline.destroy(dev);
     pyramidDownsamplePipeline.destroy(dev);
     gradProductPipeline.destroy(dev);
