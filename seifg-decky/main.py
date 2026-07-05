@@ -4,7 +4,21 @@ import shutil
 import stat
 import decky
 
-HOME = os.path.expanduser("~")
+HOME = getattr(decky, "DECKY_USER_HOME", None) or os.environ.get("DECKY_USER_HOME") or os.path.expanduser("~")
+DECKY_USER = getattr(decky, "DECKY_USER", None) or os.environ.get("DECKY_USER")
+
+
+def _chown_user(path):
+    if not DECKY_USER:
+        return
+    try:
+        shutil.chown(path, user=DECKY_USER, group=DECKY_USER)
+    except Exception:
+        try:
+            shutil.chown(path, user=DECKY_USER)
+        except Exception:
+            pass
+
 CONFIG_DIR = os.path.join(HOME, ".config", "seifg")
 GAMES_DIR = os.path.join(CONFIG_DIR, "games")
 DEFAULT_CONF = os.path.join(CONFIG_DIR, "default.json")
@@ -52,6 +66,32 @@ class Plugin:
     async def get_status(self):
         return {"installed": _is_installed()}
 
+    async def get_display_hz(self):
+        import subprocess
+        import re
+        import pwd
+        hz = 60
+        user = DECKY_USER or "deck"
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except Exception:
+            uid = 1000
+        for cmd in (
+            ["runuser", "-u", user, "--", "env", "XDG_RUNTIME_DIR=/run/user/%d" % uid, "gamescopectl"],
+            ["gamescopectl"],
+        ):
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+                for line in out.splitlines():
+                    if "ValidRefreshRates" in line:
+                        rates = [int(x) for x in re.findall(r"\d+", line)]
+                        if rates:
+                            hz = max(rates)
+                            return {"hz": hz}
+            except Exception:
+                continue
+        return {"hz": hz}
+
     async def install(self):
         plugin_dir = decky.DECKY_PLUGIN_DIR
         bundled_so = os.path.join(plugin_dir, "bin", "libseifg-vk.so")
@@ -83,6 +123,9 @@ class Plugin:
         os.makedirs(GAMES_DIR, exist_ok=True)
         if not os.path.exists(DEFAULT_CONF):
             _save_json(DEFAULT_CONF, dict(DEFAULT_SETTINGS))
+
+        for p in (LAYER_DIR, LAYER_SO, MANIFEST_DIR, MANIFEST_PATH, WRAPPER_PATH, CONFIG_DIR, GAMES_DIR, DEFAULT_CONF):
+            _chown_user(p)
 
         return True
 

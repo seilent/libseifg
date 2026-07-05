@@ -5,7 +5,6 @@ import {
   SliderField,
   ButtonItem,
   ToggleField,
-  DropdownItem,
 } from "@decky/ui";
 import { useState, useEffect } from "react";
 
@@ -32,24 +31,13 @@ interface Settings {
 }
 
 const getStatus = callable<[], Status>("get_status");
+const getDisplayHz = callable<[], { hz: number }>("get_display_hz");
 const install = callable<[], boolean>("install");
 const uninstall = callable<[], boolean>("uninstall");
 const getGameSettings = callable<[appId: string], Settings>("get_game_settings");
 const saveGameSettings = callable<[appId: string, settings: string], boolean>("save_game_settings");
 const getDefaultSettings = callable<[], Settings>("get_default_settings");
 const saveDefaultSettings = callable<[settings: string], boolean>("save_default_settings");
-
-const MULTIPLIER_OPTIONS = [
-  { data: 2, label: "2x" },
-  { data: 3, label: "3x" },
-];
-
-const FPS_OPTIONS = [
-  { data: 30, label: "30" },
-  { data: 40, label: "40" },
-  { data: 60, label: "60" },
-  { data: 120, label: "120" },
-];
 
 const state = {
   runningAppId: 0,
@@ -63,6 +51,7 @@ function Content() {
   const [gameName, setGameName] = useState(state.runningGameName);
   const [working, setWorking] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [maxHz, setMaxHz] = useState(60);
 
   const refresh = async () => {
     const s = await getStatus();
@@ -78,6 +67,7 @@ function Content() {
 
   useEffect(() => {
     refresh();
+    getDisplayHz().then((r) => setMaxHz(r.hz || 60));
     loadSettings(state.runningAppId);
     const interval = setInterval(() => {
       if (state.runningAppId !== appId) {
@@ -90,11 +80,12 @@ function Content() {
   }, []);
 
   const save = async (updated: Settings) => {
-    setSettings(updated);
+    const capped = { ...updated, multiplier: maxHz > 60 ? updated.multiplier : 2 };
+    setSettings(capped);
     if (appId > 0) {
-      await saveGameSettings(String(appId), JSON.stringify(updated));
+      await saveGameSettings(String(appId), JSON.stringify(capped));
     } else {
-      await saveDefaultSettings(JSON.stringify(updated));
+      await saveDefaultSettings(JSON.stringify(capped));
     }
   };
 
@@ -148,24 +139,41 @@ function Content() {
           {settings.enabled && (
             <>
               <PanelSectionRow>
-                <DropdownItem
-                  label="Multiplier"
-                  rgOptions={MULTIPLIER_OPTIONS}
-                  selectedOption={settings.multiplier}
-                  onChange={(opt) => save({ ...settings, multiplier: opt.data as number })}
-                />
+                {maxHz > 60 ? (
+                  <SliderField
+                    label="Multiplier"
+                    value={settings.multiplier}
+                    min={2}
+                    max={3}
+                    step={1}
+                    notchCount={2}
+                    notchLabels={[
+                      { notchIndex: 0, label: "2x" },
+                      { notchIndex: 1, label: "3x" },
+                    ]}
+                    notchTicksVisible={true}
+                    onChange={(v) => save({ ...settings, multiplier: v })}
+                  />
+                ) : (
+                  <div style={{ fontSize: "12px", opacity: 0.8 }}>
+                    Multiplier: 2x (3x needs a &gt;60Hz display)
+                  </div>
+                )}
               </PanelSectionRow>
               <PanelSectionRow>
-                <DropdownItem
+                <SliderField
                   label="Target FPS"
-                  rgOptions={FPS_OPTIONS}
-                  selectedOption={settings.target_fps}
-                  onChange={(opt) => save({ ...settings, target_fps: opt.data as number })}
+                  value={settings.target_fps}
+                  min={30}
+                  max={120}
+                  step={10}
+                  showValue={true}
+                  onChange={(v) => save({ ...settings, target_fps: v })}
                 />
               </PanelSectionRow>
               <PanelSectionRow>
                 <div style={{ fontSize: "11px", opacity: 0.6 }}>
-                  Output: {settings.target_fps} FPS, DXVK cap: {Math.max(1, Math.round(settings.target_fps / settings.multiplier))}
+                  Output: {settings.target_fps} FPS, DXVK cap: {Math.max(1, Math.round(settings.target_fps / (maxHz > 60 ? settings.multiplier : 2)))}
                 </div>
               </PanelSectionRow>
             </>
