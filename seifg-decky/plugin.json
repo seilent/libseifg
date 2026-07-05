@@ -1,0 +1,10 @@
+{
+  "name": "SeiFG",
+  "author": "seilent",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["framegen", "vulkan"],
+    "description": "Per-game frame generation via seifg-vk Vulkan layer."
+  }
+}
