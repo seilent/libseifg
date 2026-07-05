@@ -49,6 +49,11 @@ int32_t createContextFromFd(int in0Fd, int in1Fd,
 bool importTimelineSemaphore(int syncFd);
 
 void presentContextTimeline(int32_t id, uint64_t waitValue, uint64_t signalValue);
+
+bool initializeWithPicker(
+    const std::function<bool(const std::string& name, uint32_t vendorID, uint32_t deviceID)>& picker,
+    bool isHdr, uint32_t quality, uint64_t generationCount,
+    const std::function<std::vector<uint8_t>(const std::string&)>& loader);
 #endif
 
 }

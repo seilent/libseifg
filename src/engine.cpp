@@ -119,6 +119,52 @@ bool Engine::init(uint64_t deviceUUID, uint32_t q) {
     return true;
 }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+bool Engine::initWithPicker(const std::function<bool(const std::string& name, uint32_t vendorID, uint32_t deviceID)>& picker, uint32_t q) {
+    quality = 0;
+    int iters = 1;
+    int32_t refineSpecData[1] = { iters };
+    VkSpecializationMapEntry refineEntry[1] = {{0, 0, sizeof(int32_t)}};
+    VkSpecializationInfo refineSpec{1, refineEntry, sizeof(refineSpecData), refineSpecData};
+
+    if (!device.initWithPicker(picker)) return false;
+    VkDevice dev = device.device;
+
+    if (!samplers.init(dev, device.hasImageProcessing, device.hasFilterCubic)) return false;
+    if (!commands.init(dev, device.computeQueueFamily)) return false;
+    if (!descriptorPool.init(dev)) return false;
+
+    VkDescriptorType lumaTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType pyramidTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType gradTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType blockTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType blockTypesQcom[] = {VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType refineTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType refineTypesQcom[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType filterTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType occTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType warpTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkDescriptorType blendTypes[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+
+    if (!initPipeline(lumaConvertPipeline, dev, shaders::seifg_luma_convert_spv, shaders::seifg_luma_convert_spv_size, lumaTypes, 2)) return false;
+    if (!initPipeline(pyramidDownsamplePipeline, dev, shaders::seifg_pyramid_downsample_spv, shaders::seifg_pyramid_downsample_spv_size, pyramidTypes, 2)) return false;
+    if (!initPipeline(gradProductPipeline, dev, shaders::seifg_grad_product_spv, shaders::seifg_grad_product_spv_size, gradTypes, 2)) return false;
+    if (useQcom) {
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_block_match_coarse_qcom_spv, shaders::seifg_block_match_coarse_qcom_spv_size, blockTypesQcom, 3)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_refine_level_qcom_spv, shaders::seifg_refine_level_qcom_spv_size, refineTypesQcom, 4)) return false;
+    } else {
+        if (!initPipeline(blockMatchCoarsePipeline, dev, shaders::seifg_lk_coarse_spv, shaders::seifg_lk_coarse_spv_size, blockTypes, 3)) return false;
+        if (!initPipeline(refineLevelPipeline, dev, shaders::seifg_lk_refine_spv, shaders::seifg_lk_refine_spv_size, refineTypes, 4, &refineSpec)) return false;
+    }
+    if (!initPipeline(flowFilterPipeline, dev, shaders::seifg_flow_filter_spv, shaders::seifg_flow_filter_spv_size, filterTypes, 3)) return false;
+    if (!initPipeline(occlusionPipeline, dev, shaders::seifg_occlusion_spv, shaders::seifg_occlusion_spv_size, occTypes, 3)) return false;
+    if (!initPipeline(warpPipeline, dev, shaders::seifg_warp_spv, shaders::seifg_warp_spv_size, warpTypes, 3)) return false;
+    if (!initPipeline(blendPipeline, dev, shaders::seifg_blend_spv, shaders::seifg_blend_spv_size, blendTypes, 6)) return false;
+
+    return true;
+}
+#endif
+
 bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
     destroyResources();
     width = w;

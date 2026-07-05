@@ -165,6 +165,20 @@ void presentContextTimeline(int32_t, uint64_t waitValue, uint64_t signalValue) {
     g_engine->recordAndSubmit(g_in0, g_in1, g_outN.data(), static_cast<uint32_t>(g_outN.size()),
                               g_engine->importedTimeline, waitValue, signalValue);
 }
+
+bool initializeWithPicker(
+    const std::function<bool(const std::string& name, uint32_t vendorID, uint32_t deviceID)>& picker,
+    bool, uint32_t quality, uint64_t,
+    const std::function<std::vector<uint8_t>(const std::string&)>&) {
+    if (g_engine) return true;
+    g_engine = new Engine();
+    if (!g_engine->initWithPicker(picker, quality)) {
+        delete g_engine;
+        g_engine = nullptr;
+        return false;
+    }
+    return true;
+}
 #endif
 
 }

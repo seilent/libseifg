@@ -56,6 +56,9 @@ struct Engine {
     bool useCubicWarp = false;
 
     bool init(uint64_t deviceUUID, uint32_t quality);
+#if defined(__linux__) && !defined(__ANDROID__)
+    bool initWithPicker(const std::function<bool(const std::string& name, uint32_t vendorID, uint32_t deviceID)>& picker, uint32_t quality);
+#endif
     void destroy();
     bool createResources(uint32_t w, uint32_t h, VkFormat frameFormat);
     void destroyResources();
