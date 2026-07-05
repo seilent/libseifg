@@ -8,7 +8,6 @@ import {
   DropdownItem,
 } from "@decky/ui";
 import { useState, useEffect } from "react";
-import { FaBolt } from "react-icons/fa";
 
 declare const SteamClient: {
   GameSessions: {
@@ -222,7 +221,7 @@ export default definePlugin(() => {
   return {
     name: "SeiFG",
     content: <Content />,
-    icon: <FaBolt />,
+    icon: <span style={{ fontWeight: 700, fontSize: "14px" }}>FG</span>,
     onDismount() {
       reg.unregister();
     },
