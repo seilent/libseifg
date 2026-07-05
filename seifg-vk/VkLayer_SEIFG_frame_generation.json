@@ -1,0 +1,20 @@
+{
+    "file_format_version": "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_SEIFG_frame_generation",
+        "type": "GLOBAL",
+        "library_path": "./libseifg-vk.so",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "SEIFG frame generation layer",
+        "enable_environment": {
+            "SEIFG_ENABLE": "1"
+        },
+        "disable_environment": {
+            "SEIFG_DISABLE": "1"
+        },
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+        }
+    }
+}
