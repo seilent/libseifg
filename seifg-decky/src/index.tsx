@@ -80,7 +80,11 @@ function Content() {
   }, []);
 
   const save = async (updated: Settings) => {
-    const capped = { ...updated, multiplier: maxHz > 60 ? updated.multiplier : 2 };
+    const capped = {
+      ...updated,
+      multiplier: maxHz > 60 ? updated.multiplier : 2,
+      target_fps: Math.max(30, Math.min(maxHz, updated.target_fps)),
+    };
     setSettings(capped);
     if (appId > 0) {
       await saveGameSettings(String(appId), JSON.stringify(capped));
@@ -163,9 +167,9 @@ function Content() {
               <PanelSectionRow>
                 <SliderField
                   label="Target FPS"
-                  value={settings.target_fps}
+                  value={Math.min(maxHz, settings.target_fps)}
                   min={30}
-                  max={120}
+                  max={maxHz}
                   step={10}
                   showValue={true}
                   onChange={(v) => save({ ...settings, target_fps: v })}
