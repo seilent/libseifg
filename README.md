@@ -1,35 +1,33 @@
 # libseifg
 
-Vulkan compute frame generation for Android/Adreno. Interpolates frames between two real ones (30 to 60 fps), GPU only, no ML, no runtime deps. Targets Adreno 730-750 (Snapdragon 8 Gen 1-3), ~7 ms/frame at 1280x720 on an Adreno 740.
+Frame interpolation for Adreno. ~7 ms a frame at 720p on an Adreno 740.
 
 ## Pipeline
 
-Compute only, over a 6 level pyramid:
+Compute only, 6 level pyramid.
 
 1. Luma convert: RGBA to R16F.
 2. Pyramid downsample: 6 levels, bilinear.
 3. LK coarse: gradient flow at the top level, 7x7 Gaussian window.
-4. LK refine (x5): upscale the coarser flow and refine. Full res level is upscale only, flow solved at half res. Halves the cost, no quality loss.
-5. Flow filter: 3x3 median. Backward flow is the negated forward flow.
+4. LK refine (x5): upscale the coarser flow and refine. Full res is upscale only, flow at half res.
+5. Flow filter: 3x3 median. Backward flow is the negated forward.
 6. Occlusion: forward/backward consistency, per pixel confidence.
-7. Warp (x2): cubic when the device has VK_EXT_filter_cubic, bilinear otherwise.
-8. Blend: photometric agreement. Each warp weighted by how well it matches its source, fading to a plain blend where they disagree.
+7. Warp (x2): cubic with VK_EXT_filter_cubic, else bilinear.
+8. Blend: each warp weighted by photometric agreement with its source.
 
-Flow runs once per real frame pair. For an Nx multiplier the engine makes N-1 frames with warp and blend only, so higher multipliers cost little.
-
-Lucas-Kanade, not block matching. Block search gives blocky, flickering flow on game content.
+Flow runs once per frame pair. Nx makes N-1 frames, warp and blend only.
 
 ## Capabilities
 
-- 2x, 3x, 4x multipliers
+- 2x and 3x
 - AHardwareBuffer in and out, zero copy
 - FP16 intermediates
-- 16x16 workgroups (Adreno wave width)
-- SPIR-V shaders embedded at build time
+- 16x16 workgroups
+- SPIR-V embedded at build time
 
 ## Building
 
-Needs NDK r28c, CMake, arm64-v8a, C++20, a Vulkan 1.3 Adreno device. Only dependency is [volk](https://github.com/zeux/volk), fetched at configure. Shaders compiled with `glslangValidator` (`--target-env vulkan1.3`).
+NDK r28c, CMake, arm64-v8a, C++20, a Vulkan 1.3 Adreno device. Only dep is [volk](https://github.com/zeux/volk), fetched at configure. Shaders built with glslangValidator.
 
 ```sh
 NDK=/path/to/android-ndk-r28c
@@ -39,7 +37,7 @@ cmake -B build -S . \
 cmake --build build -j
 ```
 
-Add `-DSEIFG_BUILD_TESTS=ON` for the test harness. Consumable via `add_subdirectory(libseifg)` as a static lib.
+-DSEIFG_BUILD_TESTS=ON for the tests. Use with add_subdirectory(libseifg) as a static lib.
 
 ## API
 
@@ -57,11 +55,9 @@ void    waitIdle();
 void    finalize();
 ```
 
-`quality` is ignored. Flow runs one refine iteration per level; the old tiers looked the same. The param stays for signature compatibility. `createContextFromAHB` takes the two inputs and N-1 output buffers; `presentContext` runs the pipeline and fills them.
-
 ## Testing
 
-`tests/flowtest` runs synthetic motion on the device and reports accuracy, smoothness, and timing. The headline metric is discontinuity: spurious edge energy in the output that isn't in the source. It catches the blocky flicker that raw per pixel error misses. Patterns cover horizontal and diagonal pans, zoom, rotation, occlusion edges, a periodic grid, and a brightness fade.
+tests/flowtest runs synthetic motion and reports accuracy, smoothness, timing, and discontinuity (edge energy not in the source). Patterns: horizontal and diagonal pans, zoom, rotation, occlusion edges, a periodic grid, a brightness fade.
 
 ```sh
 adb push build/seifg_flowtest /data/local/tmp/
@@ -70,10 +66,6 @@ adb shell /data/local/tmp/seifg_flowtest <shift> <multiplier> <quality>
 
 ## Known limitations
 
-Inherent optical flow cases, not bugs:
-
-- Periodic patterns (fences, grids) at motion near their spacing. Aperture and periodicity ambiguity locks the flow onto the pattern.
-- Illumination changes (fades, flashes) break brightness constancy and fake motion.
-- Motion past ~55-60 px/frame exceeds the coarsest pyramid level.
-
-Translation, rotation, and zoom are clean. What remains is at disocclusion edges.
+- Periodic patterns (fences, grids) near their spacing.
+- Illumination changes (fades, flashes).
+- Motion past ~55-60 px/frame.
