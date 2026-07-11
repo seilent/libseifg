@@ -1,0 +1,7 @@
+build-android/
+build-arm64/
+xposed/build/
+xposed/app/build/
+xposed/.gradle/
+xposed/local.properties
+xposed/app/src/main/jniLibs/**/*.so
