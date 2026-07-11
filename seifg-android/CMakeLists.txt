@@ -39,6 +39,8 @@ find_library(LOG_LIB log)
 find_library(VK_LIB vulkan)
 find_library(EGL_LIB EGL)
 find_library(GLES_LIB GLESv2)
+find_library(GLES3_LIB GLESv3)
+find_library(ANDROID_LIB android)
 
 add_library(seifg-android SHARED
     ${MODULE_SRC}
@@ -68,7 +70,7 @@ if(NOT BUILD_TYPE_UP STREQUAL "DEBUG")
     target_link_options(seifg-android PRIVATE -flto -Wl,--gc-sections -Wl,--exclude-libs,ALL -s)
 endif()
 
-target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} shadowhook)
+target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} ${GLES3_LIB} ${ANDROID_LIB} shadowhook)
 
 set_target_properties(seifg-android PROPERTIES
     PREFIX ""
