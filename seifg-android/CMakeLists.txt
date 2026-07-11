@@ -25,6 +25,10 @@ if(TARGET shadowhook_nothing)
     target_compile_options(shadowhook_nothing PRIVATE -Wno-error -Wno-unsafe-buffer-usage -Wno-declaration-after-statement)
 endif()
 
+set(SEIFG_ENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set(SEIFG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(${SEIFG_ENGINE_DIR} ${CMAKE_BINARY_DIR}/libseifg-engine EXCLUDE_FROM_ALL)
+
 file(GLOB MODULE_SRC src/module.cc src/fpslimiter.cc)
 file(GLOB UTILITY_SRC src/utility/*.cc)
 file(GLOB FILEWATCH_SRC src/file_watch/*.cc)
@@ -61,6 +65,7 @@ target_include_directories(seifg-android PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third/xdl
     ${CMAKE_CURRENT_SOURCE_DIR}/third/rapidjson
     ${shadowhook_SOURCE_DIR}/shadowhook/src/main/cpp/include
+    ${SEIFG_ENGINE_DIR}/include
 )
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" BUILD_TYPE_UP)
@@ -70,7 +75,7 @@ if(NOT BUILD_TYPE_UP STREQUAL "DEBUG")
     target_link_options(seifg-android PRIVATE -flto -Wl,--gc-sections -Wl,--exclude-libs,ALL -s)
 endif()
 
-target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} ${GLES3_LIB} ${ANDROID_LIB} shadowhook)
+target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} ${GLES3_LIB} ${ANDROID_LIB} shadowhook seifg)
 
 set_target_properties(seifg-android PROPERTIES
     PREFIX ""
