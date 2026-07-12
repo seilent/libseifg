@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -91,6 +92,22 @@ static std::atomic<bool> g_vk_gen_ready{false};
 static int g_vkW = 0;
 static int g_vkH = 0;
 static VkFormat g_vkFmt = VK_FORMAT_UNDEFINED;
+
+static std::mutex g_genMu;
+static std::condition_variable g_genCv;
+static std::atomic<bool> g_genThreadStarted{false};
+static std::atomic<bool> g_genFrameReady{false};
+static std::atomic<bool> g_outReady{false};
+static std::atomic<uint64_t> g_outFrameIdx{0};
+static std::atomic<uint64_t> g_captureCount{0};
+
+static VkBuffer g_vkOutStaging = VK_NULL_HANDLE;
+static VkDeviceMemory g_vkOutStagingMem = VK_NULL_HANDLE;
+static VkSemaphore g_reinjectSem = VK_NULL_HANDLE;
+static VkCommandPool g_reinjectPool = VK_NULL_HANDLE;
+static VkCommandBuffer g_reinjectCmd = VK_NULL_HANDLE;
+static VkFence g_reinjectFence = VK_NULL_HANDLE;
+static bool g_reinjectResAlloc = false;
 
 struct SwapchainInfo {
     VkDevice device;
@@ -670,6 +687,298 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     return VK_SUCCESS;
 }
 
+static void vk_capture_setup();
+
+static void gen_thread_fn() {
+    LOG("[VkReinject] generate thread started");
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lk(g_genMu);
+            g_genCv.wait(lk, [] { return g_genFrameReady.load(); });
+            g_genFrameReady = false;
+        }
+        if (g_ctx < 0) continue;
+        uint64_t idx = g_captureCount.load();
+        if (idx < 2) continue;
+        seifg::presentContext(g_ctx, -1, {});
+        seifg::waitIdle();
+        g_outFrameIdx = idx;
+        g_outReady = true;
+    }
+}
+
+static void ensure_gen_thread() {
+    if (g_genThreadStarted.load()) return;
+    g_genThreadStarted = true;
+    std::thread(gen_thread_fn).detach();
+}
+
+static void alloc_reinject_resources(VkDevice device) {
+    if (g_reinjectResAlloc) return;
+
+    VkDeviceSize sz = static_cast<VkDeviceSize>(g_vkW) * g_vkH * 4;
+    VkBufferCreateInfo bufCi{};
+    bufCi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufCi.size = sz;
+    bufCi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult r = vkCreateBuffer(device, &bufCi, nullptr, &g_vkOutStaging);
+    if (r != VK_SUCCESS) { ERROR("[VkReinject] createBuffer out failed %d", r); return; }
+
+    VkMemoryRequirements memReqs;
+    vkGetBufferMemoryRequirements(device, g_vkOutStaging, &memReqs);
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(g_vkPhys, &memProps);
+    uint32_t memIdx = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((memReqs.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            memIdx = i;
+            break;
+        }
+    }
+    if (memIdx == UINT32_MAX) { ERROR("[VkReinject] no host-visible memory for out staging"); return; }
+
+    VkMemoryAllocateInfo memAi{};
+    memAi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memAi.allocationSize = memReqs.size;
+    memAi.memoryTypeIndex = memIdx;
+    r = vkAllocateMemory(device, &memAi, nullptr, &g_vkOutStagingMem);
+    if (r != VK_SUCCESS) { ERROR("[VkReinject] allocMemory out failed %d", r); return; }
+    vkBindBufferMemory(device, g_vkOutStaging, g_vkOutStagingMem, 0);
+
+    VkSemaphoreCreateInfo semCi{};
+    semCi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    vkCreateSemaphore(device, &semCi, nullptr, &g_reinjectSem);
+
+    VkCommandPoolCreateInfo poolCi{};
+    poolCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCi.queueFamilyIndex = g_vkFamily;
+    poolCi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    vkCreateCommandPool(device, &poolCi, nullptr, &g_reinjectPool);
+
+    VkCommandBufferAllocateInfo cmdAi{};
+    cmdAi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAi.commandPool = g_reinjectPool;
+    cmdAi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAi.commandBufferCount = 1;
+    vkAllocateCommandBuffers(device, &cmdAi, &g_reinjectCmd);
+
+    VkFenceCreateInfo fenceCi{};
+    fenceCi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vkCreateFence(device, &fenceCi, nullptr, &g_reinjectFence);
+
+    g_reinjectResAlloc = true;
+    LOG("[VkReinject] reinject resources allocated %dx%d", g_vkW, g_vkH);
+}
+
+static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo) {
+    if (!g_vk_gen_ready.load()) {
+        g_vkW = static_cast<int>(scInfo.extent.width);
+        g_vkH = static_cast<int>(scInfo.extent.height);
+        g_vkFmt = scInfo.format;
+        vk_capture_setup();
+        if (!g_vk_gen_ready.load()) return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_genMu);
+
+        AHardwareBuffer_Desc d0{}, d1{};
+        AHardwareBuffer_describe(g_ahbIn0, &d0);
+        AHardwareBuffer_describe(g_ahbIn1, &d1);
+        void* base0 = nullptr;
+        void* base1 = nullptr;
+        AHardwareBuffer_lock(g_ahbIn1, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &base1);
+        AHardwareBuffer_lock(g_ahbIn0, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &base0);
+        if (base0 && base1) {
+            uint32_t copyW = static_cast<uint32_t>(g_vkW) * 4;
+            for (int y = 0; y < g_vkH; ++y) {
+                memcpy(static_cast<uint8_t*>(base0) + static_cast<size_t>(y) * d0.stride * 4,
+                       static_cast<uint8_t*>(base1) + static_cast<size_t>(y) * d1.stride * 4,
+                       copyW);
+            }
+        }
+        AHardwareBuffer_unlock(g_ahbIn0, nullptr);
+        AHardwareBuffer_unlock(g_ahbIn1, nullptr);
+
+        vkResetCommandBuffer(g_vkCmd, 0);
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_vkCmd, &beginInfo);
+
+        VkImageMemoryBarrier bar{};
+        bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = virtImg;
+        bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(g_vkCmd,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
+        vkCmdCopyImageToBuffer(g_vkCmd, virtImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               g_vkStaging, 1, &region);
+
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar.dstAccessMask = 0;
+        vkCmdPipelineBarrier(g_vkCmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+
+        vkEndCommandBuffer(g_vkCmd);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &g_vkCmd;
+        vkQueueSubmit(g_vkQueue, 1, &submit, g_vkFence);
+        vkWaitForFences(g_vkDevice, 1, &g_vkFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(g_vkDevice, 1, &g_vkFence);
+
+        void* mapped = nullptr;
+        vkMapMemory(g_vkDevice, g_vkStagingMem, 0, g_vkStagingSize, 0, &mapped);
+        if (mapped) {
+            AHardwareBuffer_Desc dd{};
+            AHardwareBuffer_describe(g_ahbIn1, &dd);
+            void* ahbBase = nullptr;
+            AHardwareBuffer_lock(g_ahbIn1, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &ahbBase);
+            if (ahbBase) {
+                for (int y = 0; y < g_vkH; ++y) {
+                    memcpy(static_cast<uint8_t*>(ahbBase) + static_cast<size_t>(y) * dd.stride * 4,
+                           static_cast<uint8_t*>(mapped) + static_cast<size_t>(y) * g_vkW * 4,
+                           static_cast<size_t>(g_vkW) * 4);
+                }
+            }
+            AHardwareBuffer_unlock(g_ahbIn1, nullptr);
+            vkUnmapMemory(g_vkDevice, g_vkStagingMem);
+        }
+    }
+
+    uint64_t cap = g_captureCount.fetch_add(1) + 1;
+
+    if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
+        dump_ahb(g_ahbIn0, "seifg_in0.png", false);
+        dump_ahb(g_ahbIn1, "seifg_in1.png", false);
+        if (g_outReady.load()) dump_ahb(g_ahbOut, "seifg_out.png", false);
+        LOG("[VkReinject] triggered dump at capture %llu", static_cast<unsigned long long>(cap));
+        unlink(g_triggerPath);
+    }
+
+    if (cap >= 2) {
+        g_genFrameReady = true;
+        g_genCv.notify_one();
+    }
+}
+
+static VkResult vk_reinject_present_interpolated(VkQueue q, const SwapchainInfo& scInfo) {
+    if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
+    if (!g_reinjectResAlloc) return VK_ERROR_INITIALIZATION_FAILED;
+
+    void* ahbBase = nullptr;
+    AHardwareBuffer_Desc dd{};
+    AHardwareBuffer_describe(g_ahbOut, &dd);
+    int lr = AHardwareBuffer_lock(g_ahbOut, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ahbBase);
+    if (lr != 0 || !ahbBase) return VK_ERROR_UNKNOWN;
+
+    void* mapped = nullptr;
+    vkMapMemory(scInfo.device, g_vkOutStagingMem, 0,
+                static_cast<VkDeviceSize>(g_vkW) * g_vkH * 4, 0, &mapped);
+    if (mapped) {
+        for (int y = 0; y < g_vkH; ++y) {
+            memcpy(static_cast<uint8_t*>(mapped) + static_cast<size_t>(y) * g_vkW * 4,
+                   static_cast<uint8_t*>(ahbBase) + static_cast<size_t>(y) * dd.stride * 4,
+                   static_cast<size_t>(g_vkW) * 4);
+        }
+        vkUnmapMemory(scInfo.device, g_vkOutStagingMem);
+    }
+    AHardwareBuffer_unlock(g_ahbOut, nullptr);
+
+    if (!mapped) return VK_ERROR_UNKNOWN;
+
+    uint32_t realIdx = 0;
+    VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
+                                     scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
+    if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) return acqRes;
+
+    vkResetCommandBuffer(g_reinjectCmd, 0);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_reinjectCmd, &beginInfo);
+
+    VkImageMemoryBarrier bar{};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.srcAccessMask = 0;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = scInfo.realImages[realIdx];
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(g_reinjectCmd,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &bar);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
+    vkCmdCopyBufferToImage(g_reinjectCmd, g_vkOutStaging, scInfo.realImages[realIdx],
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.dstAccessMask = 0;
+    vkCmdPipelineBarrier(g_reinjectCmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &bar);
+
+    vkEndCommandBuffer(g_reinjectCmd);
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.waitSemaphoreCount = 1;
+    submit.pWaitSemaphores = &scInfo.realAcquireSem;
+    submit.pWaitDstStageMask = &waitStage;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &g_reinjectCmd;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &g_reinjectSem;
+    vkQueueSubmit(g_vkQueue, 1, &submit, g_reinjectFence);
+
+    vkWaitForFences(scInfo.device, 1, &g_reinjectFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(scInfo.device, 1, &g_reinjectFence);
+
+    VkPresentInfoKHR realPi{};
+    realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    realPi.waitSemaphoreCount = 1;
+    realPi.pWaitSemaphores = &g_reinjectSem;
+    realPi.swapchainCount = 1;
+    realPi.pSwapchains = &scInfo.realSwapchain;
+    realPi.pImageIndices = &realIdx;
+    return g_real_present(q, &realPi);
+}
+
 static void vk_capture_setup() {
     if (g_vk_gen_ready.load()) return;
     if (!g_vkDevice || !g_vkQueue) return;
@@ -1043,6 +1352,30 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
         if (!g_real_acquire)
             g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
 
+        if (g_seifg_inited.load()) {
+            ensure_gen_thread();
+            vk_virtualized_capture(scInfo.virtualImages[virtIdx], scInfo);
+        }
+
+        if (g_outReady.load()) {
+            g_outReady = false;
+
+            VkResult intRes = vk_reinject_present_interpolated(q, scInfo);
+            if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
+                ERROR("[VkReinject] interpolated present failed %d", intRes);
+            }
+
+            if (n < 3 || n % 300 == 0) {
+                LOG("[VkReinject] double-present interpolated+real #%llu",
+                    static_cast<unsigned long long>(n));
+            }
+        } else {
+            if (n < 3 || n % 300 == 0) {
+                LOG("[VkReinject] out not ready, passthrough #%llu",
+                    static_cast<unsigned long long>(n));
+            }
+        }
+
         uint32_t realIdx = 0;
         VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
                                          scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
@@ -1138,12 +1471,6 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
 
         vkWaitForFences(scInfo.device, 1, &scInfo.blitFence, VK_TRUE, UINT64_MAX);
         vkResetFences(scInfo.device, 1, &scInfo.blitFence);
-
-        if (n < 3 || n % 300 == 0) {
-            LOG("[VkReinject] present #%llu virt[%u]->real[%u] %ux%u",
-                static_cast<unsigned long long>(n), virtIdx, realIdx,
-                scInfo.extent.width, scInfo.extent.height);
-        }
 
         return presRes;
     }
