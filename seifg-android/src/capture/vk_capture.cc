@@ -10,7 +10,6 @@
 #include <mutex>
 #include <vector>
 #include <atomic>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -93,12 +92,6 @@ static int g_vkW = 0;
 static int g_vkH = 0;
 static VkFormat g_vkFmt = VK_FORMAT_UNDEFINED;
 
-static std::mutex g_genMu;
-static std::condition_variable g_genCv;
-static std::atomic<bool> g_genThreadStarted{false};
-static std::atomic<bool> g_genFrameReady{false};
-static std::atomic<bool> g_outReady{false};
-static std::atomic<uint64_t> g_outFrameIdx{0};
 static std::atomic<uint64_t> g_captureCount{0};
 
 static VkBuffer g_vkOutStaging = VK_NULL_HANDLE;
@@ -689,30 +682,6 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
 
 static void vk_capture_setup();
 
-static void gen_thread_fn() {
-    LOG("[VkReinject] generate thread started");
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lk(g_genMu);
-            g_genCv.wait(lk, [] { return g_genFrameReady.load(); });
-            g_genFrameReady = false;
-        }
-        if (g_ctx < 0) continue;
-        uint64_t idx = g_captureCount.load();
-        if (idx < 2) continue;
-        seifg::presentContext(g_ctx, -1, {});
-        seifg::waitIdle();
-        g_outFrameIdx = idx;
-        g_outReady = true;
-    }
-}
-
-static void ensure_gen_thread() {
-    if (g_genThreadStarted.load()) return;
-    g_genThreadStarted = true;
-    std::thread(gen_thread_fn).detach();
-}
-
 static void alloc_reinject_resources(VkDevice device) {
     if (g_reinjectResAlloc) return;
 
@@ -785,8 +754,6 @@ static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
     }
 
     {
-        std::lock_guard<std::mutex> lk(g_genMu);
-
         AHardwareBuffer_Desc d0{}, d1{};
         AHardwareBuffer_describe(g_ahbIn0, &d0);
         AHardwareBuffer_describe(g_ahbIn1, &d1);
@@ -870,19 +837,15 @@ static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
         }
     }
 
-    uint64_t cap = g_captureCount.fetch_add(1) + 1;
+    g_captureCount.fetch_add(1);
 
     if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
         dump_ahb(g_ahbIn0, "seifg_in0.png", false);
         dump_ahb(g_ahbIn1, "seifg_in1.png", false);
-        if (g_outReady.load()) dump_ahb(g_ahbOut, "seifg_out.png", false);
-        LOG("[VkReinject] triggered dump at capture %llu", static_cast<unsigned long long>(cap));
+        dump_ahb(g_ahbOut, "seifg_out.png", false);
+        LOG("[VkReinject] triggered dump at capture %llu",
+            static_cast<unsigned long long>(g_captureCount.load()));
         unlink(g_triggerPath);
-    }
-
-    if (cap >= 2) {
-        g_genFrameReady = true;
-        g_genCv.notify_one();
     }
 }
 
@@ -1347,33 +1310,133 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
     }
 
     if (isVirt) {
+        static uint64_t s_virtPairCount = 0;
         uint32_t virtIdx = pi->pImageIndices[0];
 
         if (!g_real_acquire)
             g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
 
         if (g_seifg_inited.load()) {
-            ensure_gen_thread();
             vk_virtualized_capture(scInfo.virtualImages[virtIdx], scInfo);
         }
 
-        if (g_outReady.load()) {
-            g_outReady = false;
+        bool havePrev = (g_captureCount.load() >= 2);
 
-            VkResult intRes = vk_reinject_present_interpolated(q, scInfo);
-            if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
-                ERROR("[VkReinject] interpolated present failed %d", intRes);
+        if (havePrev && g_vk_gen_ready.load() && g_ctx >= 0) {
+            seifg::presentContext(g_ctx, -1, {});
+            seifg::waitIdle();
+
+            if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
+            if (g_reinjectResAlloc) {
+                VkResult intRes = vk_reinject_present_interpolated(q, scInfo);
+                if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
+                    ERROR("[VkReinject] interpolated present failed %d", intRes);
+                }
             }
 
-            if (n < 3 || n % 300 == 0) {
-                LOG("[VkReinject] double-present interpolated+real #%llu",
-                    static_cast<unsigned long long>(n));
+            uint32_t realIdx = 0;
+            VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
+                                             scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
+            if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) {
+                ERROR("[VkReinject] real acquire failed %d", acqRes);
+                return acqRes;
             }
-        } else {
-            if (n < 3 || n % 300 == 0) {
-                LOG("[VkReinject] out not ready, passthrough #%llu",
-                    static_cast<unsigned long long>(n));
+
+            vkResetCommandBuffer(scInfo.blitCmd, 0);
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(scInfo.blitCmd, &beginInfo);
+
+            VkImageMemoryBarrier barriers[2]{};
+            barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[0].image = scInfo.virtualImages[virtIdx];
+            barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barriers[1].srcAccessMask = 0;
+            barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[1].image = scInfo.realImages[realIdx];
+            barriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            vkCmdPipelineBarrier(scInfo.blitCmd,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 2, barriers);
+
+            VkImageBlit region{};
+            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.srcOffsets[0] = {0, 0, 0};
+            region.srcOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
+                                    static_cast<int32_t>(scInfo.extent.height), 1};
+            region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.dstOffsets[0] = {0, 0, 0};
+            region.dstOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
+                                    static_cast<int32_t>(scInfo.extent.height), 1};
+            vkCmdBlitImage(scInfo.blitCmd,
+                           scInfo.virtualImages[virtIdx], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           scInfo.realImages[realIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &region, VK_FILTER_NEAREST);
+
+            VkImageMemoryBarrier postBar{};
+            postBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            postBar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            postBar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            postBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            postBar.dstAccessMask = 0;
+            postBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            postBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            postBar.image = scInfo.realImages[realIdx];
+            postBar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            vkCmdPipelineBarrier(scInfo.blitCmd,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &postBar);
+
+            vkEndCommandBuffer(scInfo.blitCmd);
+
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.waitSemaphoreCount = 1;
+            submit.pWaitSemaphores = &scInfo.realAcquireSem;
+            submit.pWaitDstStageMask = &waitStage;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &scInfo.blitCmd;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &scInfo.blitDoneSem;
+            vkQueueSubmit(g_vkQueue, 1, &submit, scInfo.blitFence);
+
+            VkPresentInfoKHR realPi{};
+            realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            realPi.waitSemaphoreCount = 1;
+            realPi.pWaitSemaphores = &scInfo.blitDoneSem;
+            realPi.swapchainCount = 1;
+            realPi.pSwapchains = &scInfo.realSwapchain;
+            realPi.pImageIndices = &realIdx;
+            VkResult presRes = g_real_present(q, &realPi);
+
+            vkWaitForFences(scInfo.device, 1, &scInfo.blitFence, VK_TRUE, UINT64_MAX);
+            vkResetFences(scInfo.device, 1, &scInfo.blitFence);
+
+            s_virtPairCount++;
+            if (s_virtPairCount <= 3 || s_virtPairCount % 300 == 0) {
+                LOG("[VkReinject] present pair interp+real #%llu",
+                    static_cast<unsigned long long>(s_virtPairCount));
             }
+
+            return presRes;
         }
 
         uint32_t realIdx = 0;
@@ -1471,6 +1534,11 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
 
         vkWaitForFences(scInfo.device, 1, &scInfo.blitFence, VK_TRUE, UINT64_MAX);
         vkResetFences(scInfo.device, 1, &scInfo.blitFence);
+
+        if (n < 3 || n % 300 == 0) {
+            LOG("[VkReinject] first-frame passthrough #%llu",
+                static_cast<unsigned long long>(n));
+        }
 
         return presRes;
     }
