@@ -217,7 +217,7 @@ fun ControlChip(
             )
             .background(
                 when {
-                    selected -> Tok.accentSurface
+                    selected -> Tok.accent
                     isFocused -> Tok.surfaceBright
                     else -> Color.Transparent
                 },
@@ -231,7 +231,7 @@ fun ControlChip(
             label,
             fontSize = 13.sp,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            color = if (selected) Tok.accentOnSurface else Tok.textSecondary
+            color = if (selected) Tok.bg else Tok.textSecondary
         )
     }
 }
@@ -576,6 +576,14 @@ fun AppCard(
                     color = Tok.textMuted
                 )
             }
+            if (config.enabled) {
+                Text(
+                    "${config.targetFps} fps out \u00B7 cap ${config.targetFps / config.multiplier}",
+                    fontSize = 11.sp,
+                    color = Tok.textSecondary,
+                    modifier = Modifier.padding(end = Tok.sp16)
+                )
+            }
             Switch(
                 checked = config.enabled,
                 onCheckedChange = { onUpdate(config.copy(enabled = it)) },
@@ -639,14 +647,6 @@ fun AppCard(
                         }
                     }
                 }
-
-                Spacer(Modifier.height(Tok.sp8))
-                val base = config.targetFps / config.multiplier
-                Text(
-                    "${config.targetFps} fps out \u00B7 cap $base",
-                    fontSize = 11.sp,
-                    color = Tok.textMuted
-                )
             }
         }
     }
