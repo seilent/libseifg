@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <chrono>
 #include <unistd.h>
 #include <time.h>
 
@@ -162,6 +163,8 @@ static std::mutex g_scMu;
 static std::thread g_fgThread;
 static std::mutex g_fgMutex;
 static std::condition_variable g_fgCv;
+static std::condition_variable g_fgReadyCv;
+static bool g_fgReady = true;
 static std::atomic<bool> g_fgRunning{false};
 static bool g_fgPendingValid = false;
 static std::mutex g_fgBufMutex;
@@ -1465,7 +1468,14 @@ static void framegen_thread_loop() {
             g_fgPendingValid = false;
         }
 
-        if (!g_vk_gen_ready.load() || g_ctx < 0) continue;
+        if (!g_vk_gen_ready.load() || g_ctx < 0) {
+            {
+                std::lock_guard<std::mutex> lk(g_fgMutex);
+                g_fgReady = true;
+            }
+            g_fgReadyCv.notify_one();
+            continue;
+        }
 
         g_instr.lastPrevSeq.store(prevProcessedSeq, std::memory_order_relaxed);
         g_instr.lastCurSeq.store(req.seq, std::memory_order_relaxed);
@@ -1580,6 +1590,11 @@ static void framegen_thread_loop() {
         const int64_t period = g_scPresenter.clock().periodNs();
         if (period <= 0) {
             g_scPresenter.presentOne(g_ahbReal, 0);
+            {
+                std::lock_guard<std::mutex> lk(g_fgMutex);
+                g_fgReady = true;
+            }
+            g_fgReadyCv.notify_one();
             framegen_instr_tick();
             continue;
         }
@@ -1602,6 +1617,12 @@ static void framegen_thread_loop() {
 
         g_scPresenter.commitBurst(k + (int64_t)numInterp * period);
 
+        {
+            std::lock_guard<std::mutex> lk(g_fgMutex);
+            g_fgReady = true;
+        }
+        g_fgReadyCv.notify_one();
+
         framegen_instr_tick();
     }
     LOG("[FgThread] exiting");
@@ -1616,7 +1637,9 @@ static void start_framegen_thread() {
 static void stop_framegen_thread() {
     if (g_fgRunning.exchange(false)) {
         std::lock_guard<std::mutex> lk(g_fgMutex);
+        g_fgReady = true;
         g_fgCv.notify_all();
+        g_fgReadyCv.notify_all();
     }
     if (g_fgThread.joinable()) g_fgThread.join();
 }
@@ -1801,6 +1824,14 @@ static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
         return g_real_acquire(device, swapchain, timeout, semaphore, fence, pImageIndex);
     }
 
+    if (g_fgRunning.load(std::memory_order_relaxed)) {
+        std::unique_lock<std::mutex> lk(g_fgMutex);
+        g_fgReadyCv.wait_for(lk, std::chrono::milliseconds(50), [] {
+            return g_fgReady || !g_fgRunning.load(std::memory_order_relaxed);
+        });
+        g_fgReady = false;
+    }
+
     *pImageIndex = idx;
 
     if (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE) {
@@ -1841,6 +1872,14 @@ static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
             g_real_acquire2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(resolve_real(device, "vkAcquireNextImage2KHR"));
         if (!g_real_acquire2) return VK_ERROR_INITIALIZATION_FAILED;
         return g_real_acquire2(device, pAcquireInfo, pImageIndex);
+    }
+
+    if (g_fgRunning.load(std::memory_order_relaxed)) {
+        std::unique_lock<std::mutex> lk(g_fgMutex);
+        g_fgReadyCv.wait_for(lk, std::chrono::milliseconds(50), [] {
+            return g_fgReady || !g_fgRunning.load(std::memory_order_relaxed);
+        });
+        g_fgReady = false;
     }
 
     *pImageIndex = idx;
@@ -1894,22 +1933,6 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
     if (isVirt) {
         static uint64_t s_virtPairCount = 0;
         uint32_t virtIdx = pi->pImageIndices[0];
-
-        if (g_cfgFps > 0) {
-            static struct timespec s_lastPresent = {0, 0};
-            if (s_lastPresent.tv_sec == 0 && s_lastPresent.tv_nsec == 0)
-                clock_gettime(CLOCK_MONOTONIC, &s_lastPresent);
-            int64_t intervalNs = 1000000000LL / g_cfgFps;
-            struct timespec target;
-            target.tv_sec = s_lastPresent.tv_sec;
-            target.tv_nsec = s_lastPresent.tv_nsec + intervalNs;
-            if (target.tv_nsec >= 1000000000LL) {
-                target.tv_sec += target.tv_nsec / 1000000000LL;
-                target.tv_nsec %= 1000000000LL;
-            }
-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target, nullptr);
-            s_lastPresent = target;
-        }
 
         if (!g_real_acquire)
             g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
