@@ -9,16 +9,14 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -128,28 +126,6 @@ fun getDisplayRefreshRate(activity: ComponentActivity): Int {
     return 60
 }
 
-@Composable
-fun rememberIsScrollingUp(listState: LazyListState): Boolean {
-    var previousIndex by remember { mutableIntStateOf(listState.firstVisibleItemIndex) }
-    var previousOffset by remember { mutableIntStateOf(listState.firstVisibleItemScrollOffset) }
-
-    return remember {
-        derivedStateOf {
-            val idx = listState.firstVisibleItemIndex
-            val off = listState.firstVisibleItemScrollOffset
-            val scrollingUp = when {
-                idx < previousIndex -> true
-                idx == previousIndex && off <= previousOffset -> true
-                idx == 0 && off == 0 -> true
-                else -> false
-            }
-            previousIndex = idx
-            previousOffset = off
-            scrollingUp
-        }
-    }.value
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigScreen() {
@@ -166,7 +142,6 @@ fun ConfigScreen() {
     var initialLoadDone by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
-    val searchVisible = rememberIsScrollingUp(listState)
     val firstItemFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
@@ -247,20 +222,36 @@ fun ConfigScreen() {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("SeFG") },
-                actions = {
+            Surface(tonalElevation = 3.dp) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("SeFG", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(12.dp))
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        placeholder = { Text("Search apps") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        singleLine = true,
+                        shape = MaterialTheme.shapes.small
+                    )
+                    Spacer(Modifier.width(12.dp))
                     FilterChip(
                         selected = advanced,
                         onClick = { advanced = !advanced },
                         label = { Text("Advanced") },
                         leadingIcon = {
                             Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                        modifier = Modifier.padding(end = 8.dp)
+                        }
                     )
                 }
-            )
+            }
         },
         snackbarHost = {
             snackMessage?.let { msg ->
@@ -280,20 +271,6 @@ fun ConfigScreen() {
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
-            }
-
-            AnimatedVisibility(
-                visible = searchVisible,
-                enter = slideInVertically(),
-                exit = slideOutVertically()
-            ) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    placeholder = { Text("Search apps") },
-                    singleLine = true
-                )
             }
 
             if (apps.isEmpty() && hasRoot != null) {
