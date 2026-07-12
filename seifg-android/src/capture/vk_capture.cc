@@ -80,8 +80,8 @@ static GLuint g_texIn0 = 0, g_fboIn0 = 0, g_texIn1 = 0, g_fboIn1 = 0;
 static GLuint g_texOut = 0, g_fboOut = 0;
 static int g_genW = 0, g_genH = 0;
 static char g_triggerPath[512] = {0};
-static char g_reinjectPath[512] = {0};
-static bool g_reinject = false;
+static char g_noReinjectPath[512] = {0};
+static bool g_reinject = true;
 
 static VkPhysicalDevice g_vkPhys = VK_NULL_HANDLE;
 static VkDevice g_vkDevice = VK_NULL_HANDLE;
@@ -354,8 +354,8 @@ static void seifg_gen_setup(EGLDisplay dpy, int w, int h) {
     int numOut = g_cfgMultiplier - 1;
     for (int i = 0; i < numOut; ++i)
         g_ahbOutN[i] = alloc_ahb(w, h);
-    g_ahbOut = g_ahbOutN[0];
-    if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut) { LOG("[Gen] ahb alloc failed"); return; }
+    if (numOut > 0) g_ahbOut = g_ahbOutN[0];
+    if (!g_ahbIn0 || !g_ahbIn1 || (numOut > 0 && !g_ahbOut)) { LOG("[Gen] ahb alloc failed"); return; }
 
     GLint prevTex = 0, prevFbo = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
@@ -369,8 +369,10 @@ static void seifg_gen_setup(EGLDisplay dpy, int w, int h) {
             break;
         }
     }
-    g_texOut = g_texOutN[0];
-    g_fboOut = g_fboOutN[0];
+    if (numOut > 0) {
+        g_texOut = g_texOutN[0];
+        g_fboOut = g_fboOutN[0];
+    }
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex));
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
     if (!ok0 || !ok1 || !okOut) { LOG("[Gen] fbo setup failed"); return; }
@@ -378,21 +380,23 @@ static void seifg_gen_setup(EGLDisplay dpy, int w, int h) {
     g_genW = w;
     g_genH = h;
 
-    std::vector<AHardwareBuffer*> outVec(numOut);
-    for (int i = 0; i < numOut; ++i)
-        outVec[i] = g_ahbOutN[i];
-    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
-                                        VkExtent2D{static_cast<uint32_t>(w), static_cast<uint32_t>(h)},
-                                        VK_FORMAT_R8G8B8A8_UNORM);
+    if (numOut > 0) {
+        std::vector<AHardwareBuffer*> outVec(numOut);
+        for (int i = 0; i < numOut; ++i)
+            outVec[i] = g_ahbOutN[i];
+        g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
+                                            VkExtent2D{static_cast<uint32_t>(w), static_cast<uint32_t>(h)},
+                                            VK_FORMAT_R8G8B8A8_UNORM);
+    }
 
     char pkg[256] = {0};
     FILE* cf = fopen("/proc/self/cmdline", "r");
     if (cf) { size_t rd = fread(pkg, 1, sizeof(pkg) - 1, cf); (void)rd; fclose(cf); }
     snprintf(g_triggerPath, sizeof(g_triggerPath), "/sdcard/Android/data/%s/files/seifg_trigger", pkg);
-    snprintf(g_reinjectPath, sizeof(g_reinjectPath), "/sdcard/Android/data/%s/files/seifg_reinject", pkg);
+    snprintf(g_noReinjectPath, sizeof(g_noReinjectPath), "/sdcard/Android/data/%s/files/seifg_no_reinject", pkg);
 
     LOG("[Gen] setup ctx=%d %dx%d trigger=%s", g_ctx, w, h, g_triggerPath);
-    if (g_ctx >= 0) g_gen_ready = true;
+    if (g_ctx >= 0 || numOut == 0) g_gen_ready = true;
 }
 
 static void seifg_gen_frame(EGLDisplay dpy, EGLSurface surf, uint64_t n) {
@@ -413,8 +417,10 @@ static void seifg_gen_frame(EGLDisplay dpy, EGLSurface surf, uint64_t n) {
 
     if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
         glFinish();
-        seifg::presentContext(g_ctx, -1, {});
-        seifg::waitIdle();
+        if (g_ctx >= 0) {
+            seifg::presentContext(g_ctx, -1, {});
+            seifg::waitIdle();
+        }
         dump_ahb(g_ahbIn0, "seifg_in0.png", true);
         dump_ahb(g_ahbIn1, "seifg_in1.png", true);
         dump_ahb(g_ahbOut, "seifg_out.png", true);
@@ -452,15 +458,18 @@ static EGLBoolean seifg_reinject_frame(EGLDisplay dpy, EGLSurface surf) {
     glBlitFramebuffer(0, 0, g_genW, g_genH, 0, 0, g_genW, g_genH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glFinish();
 
-    seifg::presentContext(g_ctx, -1, {});
-    seifg::waitIdle();
-
     int numInterp = g_cfgMultiplier - 1;
-    for (int i = 0; i < numInterp; ++i) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboOutN[i]);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer(0, 0, g_genW, g_genH, 0, 0, g_genW, g_genH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        g_orig_egl_swap(dpy, surf);
+
+    if (numInterp > 0) {
+        seifg::presentContext(g_ctx, -1, {});
+        seifg::waitIdle();
+
+        for (int i = 0; i < numInterp; ++i) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboOutN[i]);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+            glBlitFramebuffer(0, 0, g_genW, g_genH, 0, 0, g_genW, g_genH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            g_orig_egl_swap(dpy, surf);
+        }
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboIn1);
@@ -502,8 +511,8 @@ static EGLBoolean hooked_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             if (w > 0 && h > 0) seifg_gen_setup(dpy, w, h);
         }
         if (g_gen_ready.load()) {
-            if ((n % 30) == 0 && g_reinjectPath[0]) {
-                g_reinject = (access(g_reinjectPath, F_OK) == 0);
+            if ((n % 30) == 0 && g_noReinjectPath[0]) {
+                g_reinject = (access(g_noReinjectPath, F_OK) != 0);
             }
             if (g_reinject) return seifg_reinject_frame(dpy, surface);
             seifg_gen_frame(dpy, surface, n);
@@ -938,8 +947,8 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     FILE* cf = fopen("/proc/self/cmdline", "r");
     if (cf) { size_t rd = fread(pkg, 1, sizeof(pkg) - 1, cf); (void)rd; fclose(cf); }
     char reinjectFlag[512];
-    snprintf(reinjectFlag, sizeof(reinjectFlag), "/sdcard/Android/data/%s/files/seifg_reinject", pkg);
-    bool doVirtualize = (access(reinjectFlag, F_OK) == 0);
+    snprintf(reinjectFlag, sizeof(reinjectFlag), "/sdcard/Android/data/%s/files/seifg_no_reinject", pkg);
+    bool doVirtualize = (access(reinjectFlag, F_OK) != 0);
 
     if (!doVirtualize) {
         VkSwapchainCreateInfoKHR modCi = *ci;
@@ -1423,18 +1432,20 @@ static void vk_capture_setup() {
         int numOut = g_cfgMultiplier - 1;
         for (int i = 0; i < numOut; ++i)
             g_ahbOutN[i] = alloc_ahb(g_vkW, g_vkH);
-        g_ahbOut = g_ahbOutN[0];
-        if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut || !g_ahbReal) { LOG("[VkGen] ahb alloc failed"); return; }
+        if (numOut > 0) g_ahbOut = g_ahbOutN[0];
+        if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbReal || (numOut > 0 && !g_ahbOut)) { LOG("[VkGen] ahb alloc failed"); return; }
     }
 
     int numOut = g_cfgMultiplier - 1;
-    std::vector<AHardwareBuffer*> outVec(numOut);
-    for (int i = 0; i < numOut; ++i)
-        outVec[i] = g_ahbOutN[i];
+    if (numOut > 0) {
+        std::vector<AHardwareBuffer*> outVec(numOut);
+        for (int i = 0; i < numOut; ++i)
+            outVec[i] = g_ahbOutN[i];
 
-    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
-                                        VkExtent2D{extent.width, extent.height},
-                                        VK_FORMAT_R8G8B8A8_UNORM);
+        g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
+                                            VkExtent2D{extent.width, extent.height},
+                                            VK_FORMAT_R8G8B8A8_UNORM);
+    }
 
     if (g_triggerPath[0] == '\0') {
         char pkg[256] = {0};
@@ -1444,7 +1455,7 @@ static void vk_capture_setup() {
     }
 
     LOG("[VkGen] setup ctx=%d %dx%d fmt=%d", g_ctx, g_vkW, g_vkH, static_cast<int>(format));
-    if (g_ctx >= 0) g_vk_gen_ready = true;
+    if (g_ctx >= 0 || numOut == 0) g_vk_gen_ready = true;
 }
 
 static void framegen_instr_tick() {
@@ -1499,7 +1510,7 @@ static void framegen_thread_loop() {
             g_fgPendingValid = false;
         }
 
-        if (!g_vk_gen_ready.load() || g_ctx < 0) {
+        if (!g_vk_gen_ready.load() || (g_ctx < 0 && g_cfgMultiplier > 1)) {
             continue;
         }
 
@@ -1519,8 +1530,13 @@ static void framegen_thread_loop() {
             std::lock_guard<std::mutex> blk(g_fgBufMutex);
             int64_t tLockAfter = nowNsCapture();
             int64_t tGenStart = tLockAfter;
-            seifg::presentContext(g_ctx, -1, {});
-            seifg::waitIdle();
+
+            const int numInterp = g_cfgMultiplier - 1;
+
+            if (numInterp > 0) {
+                seifg::presentContext(g_ctx, -1, {});
+                seifg::waitIdle();
+            }
             int64_t tGenEnd = nowNsCapture();
 
             bool snapGpu = g_ahbImportAvailable && g_ahbImagesImported;
@@ -2030,7 +2046,7 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
             }
         }
 
-        if (havePrev && g_vk_gen_ready.load() && g_ctx >= 0 && g_scPresenter.ready()) {
+        if (havePrev && g_vk_gen_ready.load() && (g_ctx >= 0 || g_cfgMultiplier == 1) && g_scPresenter.ready()) {
             if (!g_fgRunning.load(std::memory_order_relaxed))
                 start_framegen_thread();
 
@@ -2172,7 +2188,7 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
 
 void SetConfig(int fps, int multiplier, int quality) {
     g_cfgFps = fps;
-    g_cfgMultiplier = (multiplier < 2) ? 2 : (multiplier > 3) ? 3 : multiplier;
+    g_cfgMultiplier = (multiplier < 1) ? 1 : (multiplier > 3) ? 3 : multiplier;
     g_cfgQuality = (quality < 0) ? 0 : (quality > 2) ? 2 : quality;
     LOG("[VkCapture] build=%s %s config fps=%d multiplier=%d quality=%d", __DATE__, __TIME__, g_cfgFps, g_cfgMultiplier, g_cfgQuality);
 }
