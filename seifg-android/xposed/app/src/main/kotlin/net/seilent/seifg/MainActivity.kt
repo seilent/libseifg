@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.roundToInt
 
 data class AppEntry(
     val label: String,
@@ -36,8 +37,9 @@ data class AppEntry(
 
 data class AppConfig(
     var enabled: Boolean = false,
-    var fps: Int = 0,
-    var multiplier: Int = 2
+    var targetFps: Int = 60,
+    var multiplier: Int = 2,
+    var quality: Int = 2
 )
 
 class MainActivity : ComponentActivity() {
@@ -58,11 +60,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Suppress("DEPRECATION")
+fun getDisplayRefreshRate(activity: ComponentActivity): Int {
+    val rate = if (Build.VERSION.SDK_INT >= 30) {
+        activity.display?.refreshRate ?: 60f
+    } else {
+        val wm = activity.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager
+        wm.defaultDisplay.refreshRate
+    }
+    return rate.toInt()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val refreshHz = remember { getDisplayRefreshRate(context as ComponentActivity) }
 
     var hasRoot by remember { mutableStateOf<Boolean?>(null) }
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
@@ -86,10 +100,15 @@ fun ConfigScreen() {
                             val map = mutableMapOf<String, AppConfig>()
                             for (key in custom.keys()) {
                                 val obj = custom.getJSONObject(key)
+                                val mult = obj.optInt("multiplier", 2)
+                                val fps = obj.optInt("fps", 30)
+                                val targetFps = obj.optInt("target_fps", fps * mult)
+                                val quality = obj.optInt("quality", 2)
                                 map[key] = AppConfig(
                                     enabled = true,
-                                    fps = obj.optInt("fps", 0),
-                                    multiplier = obj.optInt("multiplier", 2)
+                                    targetFps = targetFps.coerceIn(30, refreshHz),
+                                    multiplier = mult.coerceIn(2, 3),
+                                    quality = quality.coerceIn(0, 2)
                                 )
                             }
                             configs = map
@@ -136,9 +155,12 @@ fun ConfigScreen() {
                                 val custom = JSONObject()
                                 for ((pkg, cfg) in configs) {
                                     if (cfg.enabled) {
+                                        val cap = maxOf(1, (cfg.targetFps.toFloat() / cfg.multiplier).roundToInt())
                                         val entry = JSONObject()
-                                        entry.put("fps", cfg.fps)
+                                        entry.put("fps", cap)
                                         entry.put("multiplier", cfg.multiplier)
+                                        entry.put("quality", cfg.quality)
+                                        entry.put("target_fps", cfg.targetFps)
                                         custom.put(pkg, entry)
                                     }
                                 }
@@ -203,8 +225,8 @@ fun ConfigScreen() {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(filtered, key = { it.packageName }) { app ->
-                        val cfg = configs.getOrPut(app.packageName) { AppConfig() }
-                        AppRow(app, cfg) { updated ->
+                        val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = minOf(60, refreshHz)) }
+                        AppRow(app, cfg, refreshHz) { updated ->
                             configs = configs.toMutableMap().also { it[app.packageName] = updated }
                         }
                     }
@@ -215,9 +237,10 @@ fun ConfigScreen() {
 }
 
 @Composable
-fun AppRow(app: AppEntry, config: AppConfig, onUpdate: (AppConfig) -> Unit) {
-    val fpsOptions = listOf(0, 30, 45, 60)
+fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfig) -> Unit) {
     val multiplierOptions = listOf(2, 3)
+    val qualityLabels = listOf("Performance", "Balanced", "Quality")
+    val can3x = refreshHz > 60
 
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -238,37 +261,88 @@ fun AppRow(app: AppEntry, config: AppConfig, onUpdate: (AppConfig) -> Unit) {
         }
 
         AnimatedVisibility(visible = config.enabled) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 52.dp, top = 4.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("FPS", style = MaterialTheme.typography.labelMedium)
-                SingleChoiceSegmentedButtonRow {
-                    fpsOptions.forEachIndexed { index, fps ->
+            Column(modifier = Modifier.padding(start = 52.dp, top = 4.dp, bottom = 8.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("Multiplier", style = MaterialTheme.typography.labelMedium)
+                    SingleChoiceSegmentedButtonRow {
+                        multiplierOptions.forEachIndexed { index, mult ->
+                            SegmentedButton(
+                                selected = config.multiplier == mult,
+                                onClick = {
+                                    if (mult == 3 && !can3x) return@SegmentedButton
+                                    onUpdate(config.copy(multiplier = mult))
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size),
+                                enabled = mult != 3 || can3x
+                            ) {
+                                Text("${mult}x")
+                            }
+                        }
+                    }
+                }
+                if (!can3x) {
+                    Text(
+                        "3x needs a >60 Hz display",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Text("Target FPS: ${config.targetFps}", style = MaterialTheme.typography.labelMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = {
+                            val newVal = (config.targetFps - 5).coerceIn(30, refreshHz)
+                            onUpdate(config.copy(targetFps = newVal))
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(36.dp)
+                    ) { Text("-") }
+                    Slider(
+                        value = config.targetFps.toFloat(),
+                        onValueChange = { onUpdate(config.copy(targetFps = (it / 5).roundToInt() * 5)) },
+                        valueRange = 30f..refreshHz.toFloat(),
+                        steps = ((refreshHz - 30) / 5) - 1,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = {
+                            val newVal = (config.targetFps + 5).coerceIn(30, refreshHz)
+                            onUpdate(config.copy(targetFps = newVal))
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(36.dp)
+                    ) { Text("+") }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Text("Quality", style = MaterialTheme.typography.labelMedium)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    qualityLabels.forEachIndexed { index, label ->
                         SegmentedButton(
-                            selected = config.fps == fps,
-                            onClick = { onUpdate(config.copy(fps = fps)) },
-                            shape = SegmentedButtonDefaults.itemShape(index, fpsOptions.size)
+                            selected = config.quality == index,
+                            onClick = { onUpdate(config.copy(quality = index)) },
+                            shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size)
                         ) {
-                            Text(if (fps == 0) "Off" else "$fps")
+                            Text(label, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
 
-                Spacer(Modifier.width(8.dp))
-                Text("×", style = MaterialTheme.typography.labelMedium)
-                SingleChoiceSegmentedButtonRow {
-                    multiplierOptions.forEachIndexed { index, mult ->
-                        SegmentedButton(
-                            selected = config.multiplier == mult,
-                            onClick = { onUpdate(config.copy(multiplier = mult)) },
-                            shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size)
-                        ) {
-                            Text("${mult}x")
-                        }
-                    }
-                }
+                Spacer(Modifier.height(8.dp))
+
+                val cap = maxOf(1, (config.targetFps.toFloat() / config.multiplier).roundToInt())
+                Text(
+                    "Output ${config.targetFps} FPS  |  render cap $cap FPS",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
