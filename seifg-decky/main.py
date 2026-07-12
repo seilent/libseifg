@@ -34,6 +34,7 @@ DEFAULT_SETTINGS = {
     "enabled": False,
     "multiplier": 2,
     "target_fps": 60,
+    "flow_scale": 1,
 }
 
 

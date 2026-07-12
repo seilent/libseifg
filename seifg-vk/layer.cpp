@@ -139,6 +139,15 @@ static uint32_t getQuality() {
     return static_cast<uint32_t>(val);
 }
 
+static uint32_t getFlowScale() {
+    const char* env = std::getenv("SEIFG_FLOW_SCALE");
+    if (!env) return 1;
+    int val = std::atoi(env);
+    if (val < 1) return 1;
+    if (val > 4) return 4;
+    return static_cast<uint32_t>(val);
+}
+
 static void* getDispatchKey(void* object) {
     return *reinterpret_cast<void**>(object);
 }
@@ -712,6 +721,10 @@ static VkResult VKAPI_CALL seifg_CreateSwapchainKHR(
             return VK_SUCCESS;
         }
         g_engineInitialized = true;
+
+        uint32_t flowScale = getFlowScale();
+        if (flowScale > 1)
+            seifg::setFlowDownscale(flowScale);
     }
 
     std::vector<int> destFds;

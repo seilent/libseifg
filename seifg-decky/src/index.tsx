@@ -28,6 +28,7 @@ interface Settings {
   enabled: boolean;
   multiplier: number;
   target_fps: number;
+  flow_scale: number;
 }
 
 const getStatus = callable<[], Status>("get_status");
@@ -173,6 +174,24 @@ function Content() {
                   step={10}
                   showValue={true}
                   onChange={(v) => save({ ...settings, target_fps: v })}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <SliderField
+                  label="Flow Scale"
+                  value={settings.flow_scale ?? 1}
+                  min={1}
+                  max={4}
+                  step={1}
+                  notchCount={4}
+                  notchLabels={[
+                    { notchIndex: 0, label: "1" },
+                    { notchIndex: 1, label: "2" },
+                    { notchIndex: 2, label: "3" },
+                    { notchIndex: 3, label: "4" },
+                  ]}
+                  notchTicksVisible={true}
+                  onChange={(v) => save({ ...settings, flow_scale: v })}
                 />
               </PanelSectionRow>
               <PanelSectionRow>

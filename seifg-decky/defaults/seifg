@@ -14,6 +14,7 @@ fi
 ENABLED=$(python3 -c "import json; d=json.load(open('$SETTINGS')); print(1 if d.get('enabled') else 0)" 2>/dev/null || echo 0)
 MULTIPLIER=$(python3 -c "import json; d=json.load(open('$SETTINGS')); print(min(3, max(2, int(d.get('multiplier', 2)))))" 2>/dev/null || echo 2)
 TARGET_FPS=$(python3 -c "import json; d=json.load(open('$SETTINGS')); print(int(d.get('target_fps', 60)))" 2>/dev/null || echo 60)
+FLOW_SCALE=$(python3 -c "import json; d=json.load(open('$SETTINGS')); print(min(4, max(1, int(d.get('flow_scale', 1)))))" 2>/dev/null || echo 1)
 
 if [ "$ENABLED" = "1" ] && [ "$MULTIPLIER" -ge 2 ] 2>/dev/null; then
     DXVK_RATE=$(python3 -c "print(max(1, round($TARGET_FPS / $MULTIPLIER)))" 2>/dev/null || echo 30)
@@ -21,6 +22,7 @@ if [ "$ENABLED" = "1" ] && [ "$MULTIPLIER" -ge 2 ] 2>/dev/null; then
     export VK_INSTANCE_LAYERS=VK_LAYER_SEIFG_frame_generation
     export VK_ADD_IMPLICIT_LAYER_PATH="$HOME/.local/share/vulkan/implicit_layer.d"
     export SEIFG_MULTIPLIER="$MULTIPLIER"
+    export SEIFG_FLOW_SCALE="$FLOW_SCALE"
     export DXVK_FRAME_RATE="$DXVK_RATE"
     export VKD3D_FRAME_RATE="$DXVK_RATE"
 fi
