@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -22,6 +23,10 @@ android {
         debug {}
     }
 
+    buildFeatures {
+        compose = true
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -40,4 +45,13 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+
+    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+
+    implementation("com.github.topjohnwu.libsu:core:6.0.0")
 }
