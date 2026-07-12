@@ -98,10 +98,25 @@ struct SwapchainInfo {
     VkExtent2D extent;
     uint32_t imageCount;
     std::vector<VkImage> images;
+    bool virtualized = false;
+    VkSwapchainKHR realSwapchain = VK_NULL_HANDLE;
+    std::vector<VkImage> virtualImages;
+    std::vector<VkDeviceMemory> virtualMem;
+    std::vector<VkImage> realImages;
+    uint32_t nextVirtualIdx = 0;
+    VkSemaphore realAcquireSem = VK_NULL_HANDLE;
+    VkSemaphore blitDoneSem = VK_NULL_HANDLE;
+    VkFence blitFence = VK_NULL_HANDLE;
+    VkCommandPool blitPool = VK_NULL_HANDLE;
+    VkCommandBuffer blitCmd = VK_NULL_HANDLE;
 };
 
 static std::unordered_map<VkSwapchainKHR, SwapchainInfo> g_swapchains;
 static std::mutex g_mu;
+
+static PFN_vkGetSwapchainImagesKHR g_real_get_swapchain_images = nullptr;
+static PFN_vkAcquireNextImageKHR g_real_acquire = nullptr;
+static PFN_vkAcquireNextImage2KHR g_real_acquire2 = nullptr;
 
 static VkResult VKAPI_CALL hooked_CreateDevice(
     VkPhysicalDevice phys,
@@ -116,6 +131,22 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
 static VkResult VKAPI_CALL hooked_QueuePresentKHR(
     VkQueue q,
     const VkPresentInfoKHR* pi);
+static VkResult VKAPI_CALL hooked_GetSwapchainImagesKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint32_t* pSwapchainImageCount,
+    VkImage* pSwapchainImages);
+static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t* pImageIndex);
+static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
+    VkDevice device,
+    const VkAcquireNextImageInfoKHR* pAcquireInfo,
+    uint32_t* pImageIndex);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstance instance, const char* pName);
 
@@ -332,17 +363,39 @@ static EGLBoolean hooked_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     return g_orig_egl_swap(dpy, surface);
 }
 
+static PFN_vkVoidFunction resolve_real(VkDevice device, const char* name) {
+    PFN_vkVoidFunction p = nullptr;
+    if (g_real_gdpa) p = g_real_gdpa(device, name);
+    if (!p && g_real_gipa && g_vkInstance) p = g_real_gipa(g_vkInstance, name);
+    return p;
+}
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
     if (strcmp(pName, "vkQueuePresentKHR") == 0) {
-        if (!g_real_present && g_real_gdpa)
-            g_real_present = reinterpret_cast<PFN_vkQueuePresentKHR>(g_real_gdpa(device, pName));
+        if (!g_real_present)
+            g_real_present = reinterpret_cast<PFN_vkQueuePresentKHR>(resolve_real(device, pName));
         return reinterpret_cast<PFN_vkVoidFunction>(hooked_QueuePresentKHR);
     }
     if (strcmp(pName, "vkCreateSwapchainKHR") == 0) {
-        if (!g_real_create_swapchain && g_real_gdpa)
-            g_real_create_swapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(g_real_gdpa(device, pName));
+        if (!g_real_create_swapchain)
+            g_real_create_swapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(resolve_real(device, pName));
         return reinterpret_cast<PFN_vkVoidFunction>(hooked_CreateSwapchainKHR);
+    }
+    if (strcmp(pName, "vkGetSwapchainImagesKHR") == 0) {
+        if (!g_real_get_swapchain_images)
+            g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(resolve_real(device, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_GetSwapchainImagesKHR);
+    }
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0) {
+        if (!g_real_acquire)
+            g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(device, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_AcquireNextImageKHR);
+    }
+    if (strcmp(pName, "vkAcquireNextImage2KHR") == 0) {
+        if (!g_real_acquire2)
+            g_real_acquire2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(resolve_real(device, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_AcquireNextImage2KHR);
     }
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(my_GetDeviceProcAddr);
@@ -380,6 +433,21 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstanc
             g_real_present = reinterpret_cast<PFN_vkQueuePresentKHR>(g_real_gipa(instance, pName));
         return reinterpret_cast<PFN_vkVoidFunction>(hooked_QueuePresentKHR);
     }
+    if (strcmp(pName, "vkGetSwapchainImagesKHR") == 0) {
+        if (!g_real_get_swapchain_images && g_real_gipa)
+            g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_GetSwapchainImagesKHR);
+    }
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0) {
+        if (!g_real_acquire && g_real_gipa)
+            g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_AcquireNextImageKHR);
+    }
+    if (strcmp(pName, "vkAcquireNextImage2KHR") == 0) {
+        if (!g_real_acquire2 && g_real_gipa)
+            g_real_acquire2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_AcquireNextImage2KHR);
+    }
     return g_real_gipa ? g_real_gipa(instance, pName) : nullptr;
 }
 
@@ -411,6 +479,18 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
     return result;
 }
 
+static uint32_t find_device_local_memory(VkPhysicalDevice phys, uint32_t typeBits) {
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(phys, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((typeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
 static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     VkDevice device,
     const VkSwapchainCreateInfoKHR* ci,
@@ -422,36 +502,172 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
+    char pkg[256] = {0};
+    FILE* cf = fopen("/proc/self/cmdline", "r");
+    if (cf) { size_t rd = fread(pkg, 1, sizeof(pkg) - 1, cf); (void)rd; fclose(cf); }
+    char reinjectFlag[512];
+    snprintf(reinjectFlag, sizeof(reinjectFlag), "/sdcard/Android/data/%s/files/seifg_reinject", pkg);
+    bool doVirtualize = (access(reinjectFlag, F_OK) == 0);
+
+    if (!doVirtualize) {
+        VkSwapchainCreateInfoKHR modCi = *ci;
+        modCi.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        LOG("[VkCapture] adding TRANSFER_SRC to swapchain usage (was 0x%x now 0x%x)",
+            ci->imageUsage, modCi.imageUsage);
+
+        VkResult result = g_real_create_swapchain(device, &modCi, a, pSc);
+        if (result == VK_SUCCESS && pSc) {
+            if (!g_real_get_swapchain_images)
+                g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(resolve_real(device, "vkGetSwapchainImagesKHR"));
+            if (!g_real_get_swapchain_images) {
+                ERROR("[VkGen] could not resolve vkGetSwapchainImagesKHR");
+                return result;
+            }
+            uint32_t n = 0;
+            g_real_get_swapchain_images(device, *pSc, &n, nullptr);
+            std::vector<VkImage> images(n);
+            g_real_get_swapchain_images(device, *pSc, &n, images.data());
+
+            std::lock_guard<std::mutex> lock(g_mu);
+            auto& info = g_swapchains[*pSc];
+            info.device = device;
+            info.format = ci->imageFormat;
+            info.extent = ci->imageExtent;
+            info.imageCount = n;
+            info.images = std::move(images);
+            info.virtualized = false;
+
+            LOG("[VkCapture] swapchain created %ux%u fmt=%d images=%u",
+                ci->imageExtent.width, ci->imageExtent.height,
+                static_cast<int>(ci->imageFormat), n);
+        }
+        return result;
+    }
+
+    LOG("[VkReinject] virtualization enabled, creating real swapchain with FIFO");
+
     VkSwapchainCreateInfoKHR modCi = *ci;
-    modCi.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    LOG("[VkCapture] adding TRANSFER_SRC to swapchain usage (was 0x%x now 0x%x)",
-        ci->imageUsage, modCi.imageUsage);
+    modCi.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    modCi.presentMode = VK_PRESENT_MODE_FIFO_KHR;
 
     VkResult result = g_real_create_swapchain(device, &modCi, a, pSc);
-    if (result == VK_SUCCESS && pSc) {
-        static PFN_vkGetSwapchainImagesKHR p_getSwapImages = nullptr;
-        if (!p_getSwapImages && g_real_gdpa)
-            p_getSwapImages = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(g_real_gdpa(device, "vkGetSwapchainImagesKHR"));
-        if (!p_getSwapImages && g_real_gipa && g_vkInstance)
-            p_getSwapImages = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(g_real_gipa(g_vkInstance, "vkGetSwapchainImagesKHR"));
-        if (!p_getSwapImages) {
-            ERROR("[VkGen] could not resolve vkGetSwapchainImagesKHR");
-            return result;
-        }
-        uint32_t n = 0;
-        p_getSwapImages(device, *pSc, &n, nullptr);
-        std::vector<VkImage> images(n);
-        p_getSwapImages(device, *pSc, &n, images.data());
+    if (result != VK_SUCCESS || !pSc) return result;
 
-        std::lock_guard<std::mutex> lock(g_mu);
-        g_swapchains[*pSc] = SwapchainInfo{
-            device, ci->imageFormat, ci->imageExtent, n, std::move(images)};
+    VkSwapchainKHR realSc = *pSc;
 
-        LOG("[VkCapture] swapchain created %ux%u fmt=%d images=%u",
-            ci->imageExtent.width, ci->imageExtent.height,
-            static_cast<int>(ci->imageFormat), n);
+    if (!g_real_get_swapchain_images)
+        g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(resolve_real(device, "vkGetSwapchainImagesKHR"));
+    if (!g_real_get_swapchain_images) {
+        ERROR("[VkReinject] could not resolve vkGetSwapchainImagesKHR");
+        return result;
     }
-    return result;
+
+    uint32_t realCount = 0;
+    g_real_get_swapchain_images(device, realSc, &realCount, nullptr);
+    std::vector<VkImage> realImages(realCount);
+    g_real_get_swapchain_images(device, realSc, &realCount, realImages.data());
+
+    std::vector<VkImage> virtImages(realCount);
+    std::vector<VkDeviceMemory> virtMem(realCount);
+
+    VkImageCreateInfo imgCi{};
+    imgCi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgCi.imageType = VK_IMAGE_TYPE_2D;
+    imgCi.format = ci->imageFormat;
+    imgCi.extent = {ci->imageExtent.width, ci->imageExtent.height, 1};
+    imgCi.mipLevels = 1;
+    imgCi.arrayLayers = 1;
+    imgCi.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgCi.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgCi.usage = ci->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imgCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgCi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    for (uint32_t i = 0; i < realCount; ++i) {
+        VkResult r = vkCreateImage(device, &imgCi, nullptr, &virtImages[i]);
+        if (r != VK_SUCCESS) {
+            ERROR("[VkReinject] vkCreateImage[%u] failed %d", i, r);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkMemoryRequirements memReqs;
+        vkGetImageMemoryRequirements(device, virtImages[i], &memReqs);
+
+        uint32_t memIdx = find_device_local_memory(g_vkPhys, memReqs.memoryTypeBits);
+        if (memIdx == UINT32_MAX) {
+            ERROR("[VkReinject] no DEVICE_LOCAL memory type");
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkMemoryAllocateInfo memAi{};
+        memAi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        memAi.allocationSize = memReqs.size;
+        memAi.memoryTypeIndex = memIdx;
+        r = vkAllocateMemory(device, &memAi, nullptr, &virtMem[i]);
+        if (r != VK_SUCCESS) {
+            ERROR("[VkReinject] vkAllocateMemory[%u] failed %d", i, r);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        r = vkBindImageMemory(device, virtImages[i], virtMem[i], 0);
+        if (r != VK_SUCCESS) {
+            ERROR("[VkReinject] vkBindImageMemory[%u] failed %d", i, r);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+
+    VkSemaphoreCreateInfo semCi{};
+    semCi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    VkSemaphore realAcqSem = VK_NULL_HANDLE;
+    VkSemaphore blitDoneSem = VK_NULL_HANDLE;
+    vkCreateSemaphore(device, &semCi, nullptr, &realAcqSem);
+    vkCreateSemaphore(device, &semCi, nullptr, &blitDoneSem);
+
+    VkFenceCreateInfo fenceCi{};
+    fenceCi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence blitFence = VK_NULL_HANDLE;
+    vkCreateFence(device, &fenceCi, nullptr, &blitFence);
+
+    VkCommandPoolCreateInfo poolCi{};
+    poolCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCi.queueFamilyIndex = g_vkFamily;
+    poolCi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    VkCommandPool blitPool = VK_NULL_HANDLE;
+    vkCreateCommandPool(device, &poolCi, nullptr, &blitPool);
+
+    VkCommandBufferAllocateInfo cmdAi{};
+    cmdAi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAi.commandPool = blitPool;
+    cmdAi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAi.commandBufferCount = 1;
+    VkCommandBuffer blitCmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(device, &cmdAi, &blitCmd);
+
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto& info = g_swapchains[realSc];
+        info.device = device;
+        info.format = ci->imageFormat;
+        info.extent = ci->imageExtent;
+        info.imageCount = realCount;
+        info.images = {};
+        info.virtualized = true;
+        info.realSwapchain = realSc;
+        info.virtualImages = std::move(virtImages);
+        info.virtualMem = std::move(virtMem);
+        info.realImages = std::move(realImages);
+        info.nextVirtualIdx = 0;
+        info.realAcquireSem = realAcqSem;
+        info.blitDoneSem = blitDoneSem;
+        info.blitFence = blitFence;
+        info.blitPool = blitPool;
+        info.blitCmd = blitCmd;
+    }
+
+    LOG("[VkReinject] virtualized swapchain %ux%u fmt=%d virtualImages=%u realImages=%u",
+        ci->imageExtent.width, ci->imageExtent.height,
+        static_cast<int>(ci->imageFormat), realCount, realCount);
+    return VK_SUCCESS;
 }
 
 static void vk_capture_setup() {
@@ -673,6 +889,124 @@ static void vk_capture_present(const VkPresentInfoKHR* pi) {
     }
 }
 
+static VkResult VKAPI_CALL hooked_GetSwapchainImagesKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint32_t* pSwapchainImageCount,
+    VkImage* pSwapchainImages) {
+
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_swapchains.find(swapchain);
+        if (it != g_swapchains.end() && it->second.virtualized) {
+            uint32_t count = static_cast<uint32_t>(it->second.virtualImages.size());
+            if (!pSwapchainImages) {
+                *pSwapchainImageCount = count;
+                return VK_SUCCESS;
+            }
+            uint32_t toWrite = *pSwapchainImageCount < count ? *pSwapchainImageCount : count;
+            for (uint32_t i = 0; i < toWrite; ++i)
+                pSwapchainImages[i] = it->second.virtualImages[i];
+            *pSwapchainImageCount = toWrite;
+            return toWrite < count ? VK_INCOMPLETE : VK_SUCCESS;
+        }
+    }
+
+    if (!g_real_get_swapchain_images)
+        g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(resolve_real(device, "vkGetSwapchainImagesKHR"));
+    if (!g_real_get_swapchain_images) return VK_ERROR_INITIALIZATION_FAILED;
+    return g_real_get_swapchain_images(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+}
+
+static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t* pImageIndex) {
+
+    bool isVirt = false;
+    uint32_t idx = 0;
+    uint32_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_swapchains.find(swapchain);
+        if (it != g_swapchains.end() && it->second.virtualized) {
+            isVirt = true;
+            count = static_cast<uint32_t>(it->second.virtualImages.size());
+            idx = it->second.nextVirtualIdx;
+            it->second.nextVirtualIdx = (idx + 1) % count;
+        }
+    }
+
+    if (!isVirt) {
+        if (!g_real_acquire)
+            g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(device, "vkAcquireNextImageKHR"));
+        if (!g_real_acquire) return VK_ERROR_INITIALIZATION_FAILED;
+        return g_real_acquire(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    }
+
+    *pImageIndex = idx;
+
+    if (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        if (semaphore != VK_NULL_HANDLE) {
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &semaphore;
+        }
+        vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+    }
+
+    return VK_SUCCESS;
+}
+
+static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
+    VkDevice device,
+    const VkAcquireNextImageInfoKHR* pAcquireInfo,
+    uint32_t* pImageIndex) {
+
+    bool isVirt = false;
+    uint32_t idx = 0;
+    uint32_t count = 0;
+    VkSwapchainKHR swapchain = pAcquireInfo->swapchain;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_swapchains.find(swapchain);
+        if (it != g_swapchains.end() && it->second.virtualized) {
+            isVirt = true;
+            count = static_cast<uint32_t>(it->second.virtualImages.size());
+            idx = it->second.nextVirtualIdx;
+            it->second.nextVirtualIdx = (idx + 1) % count;
+        }
+    }
+
+    if (!isVirt) {
+        if (!g_real_acquire2)
+            g_real_acquire2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(resolve_real(device, "vkAcquireNextImage2KHR"));
+        if (!g_real_acquire2) return VK_ERROR_INITIALIZATION_FAILED;
+        return g_real_acquire2(device, pAcquireInfo, pImageIndex);
+    }
+
+    *pImageIndex = idx;
+
+    VkSemaphore semaphore = pAcquireInfo->semaphore;
+    VkFence fence = pAcquireInfo->fence;
+
+    if (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        if (semaphore != VK_NULL_HANDLE) {
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &semaphore;
+        }
+        vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+    }
+
+    return VK_SUCCESS;
+}
+
 static VkResult VKAPI_CALL hooked_QueuePresentKHR(
     VkQueue q,
     const VkPresentInfoKHR* pi) {
@@ -686,24 +1020,138 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
 
     static std::atomic_flag present_first = ATOMIC_FLAG_INIT;
     if (!present_first.test_and_set()) {
-        LOG("[VkGen] present intercepted, capture path %s", g_vk_gen_ready.load() ? "ready" : "warming");
+        LOG("[VkGen] present intercepted");
     }
 
     static std::atomic<uint64_t> frame{0};
     uint64_t n = frame.fetch_add(1);
 
-    if (n < 3 || n % 300 == 0) {
-        uint32_t w = 0, h = 0;
-        if (pi->swapchainCount > 0) {
-            std::lock_guard<std::mutex> lock(g_mu);
-            auto it = g_swapchains.find(pi->pSwapchains[0]);
-            if (it != g_swapchains.end()) {
-                w = it->second.extent.width;
-                h = it->second.extent.height;
-            }
+    bool isVirt = false;
+    SwapchainInfo scInfo{};
+    if (pi->swapchainCount > 0) {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_swapchains.find(pi->pSwapchains[0]);
+        if (it != g_swapchains.end()) {
+            scInfo = it->second;
+            isVirt = it->second.virtualized;
         }
+    }
+
+    if (isVirt) {
+        uint32_t virtIdx = pi->pImageIndices[0];
+
+        if (!g_real_acquire)
+            g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
+
+        uint32_t realIdx = 0;
+        VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
+                                         scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
+        if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) {
+            ERROR("[VkReinject] real acquire failed %d", acqRes);
+            return acqRes;
+        }
+
+        vkResetCommandBuffer(scInfo.blitCmd, 0);
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(scInfo.blitCmd, &beginInfo);
+
+        VkImageMemoryBarrier barriers[2]{};
+        barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barriers[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[0].image = scInfo.virtualImages[virtIdx];
+        barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barriers[1].srcAccessMask = 0;
+        barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[1].image = scInfo.realImages[realIdx];
+        barriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        vkCmdPipelineBarrier(scInfo.blitCmd,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, barriers);
+
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[0] = {0, 0, 0};
+        region.srcOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
+                                static_cast<int32_t>(scInfo.extent.height), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[0] = {0, 0, 0};
+        region.dstOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
+                                static_cast<int32_t>(scInfo.extent.height), 1};
+        vkCmdBlitImage(scInfo.blitCmd,
+                       scInfo.virtualImages[virtIdx], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       scInfo.realImages[realIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region, VK_FILTER_NEAREST);
+
+        VkImageMemoryBarrier postBar{};
+        postBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        postBar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        postBar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        postBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        postBar.dstAccessMask = 0;
+        postBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postBar.image = scInfo.realImages[realIdx];
+        postBar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        vkCmdPipelineBarrier(scInfo.blitCmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &postBar);
+
+        vkEndCommandBuffer(scInfo.blitCmd);
+
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores = &scInfo.realAcquireSem;
+        submit.pWaitDstStageMask = &waitStage;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &scInfo.blitCmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &scInfo.blitDoneSem;
+        vkQueueSubmit(g_vkQueue, 1, &submit, scInfo.blitFence);
+
+        VkPresentInfoKHR realPi{};
+        realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        realPi.waitSemaphoreCount = 1;
+        realPi.pWaitSemaphores = &scInfo.blitDoneSem;
+        realPi.swapchainCount = 1;
+        realPi.pSwapchains = &scInfo.realSwapchain;
+        realPi.pImageIndices = &realIdx;
+        VkResult presRes = g_real_present(q, &realPi);
+
+        vkWaitForFences(scInfo.device, 1, &scInfo.blitFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(scInfo.device, 1, &scInfo.blitFence);
+
+        if (n < 3 || n % 300 == 0) {
+            LOG("[VkReinject] present #%llu virt[%u]->real[%u] %ux%u",
+                static_cast<unsigned long long>(n), virtIdx, realIdx,
+                scInfo.extent.width, scInfo.extent.height);
+        }
+
+        return presRes;
+    }
+
+    if (n < 3 || n % 300 == 0) {
         LOG("[VkCapture] present #%llu swapchains=%u %ux%u",
-            static_cast<unsigned long long>(n), pi->swapchainCount, w, h);
+            static_cast<unsigned long long>(n), pi->swapchainCount,
+            scInfo.extent.width, scInfo.extent.height);
     }
 
     if (g_seifg_inited.load() && g_vkDevice) {
