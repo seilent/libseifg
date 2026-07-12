@@ -9,6 +9,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,7 +41,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
@@ -52,57 +53,65 @@ import org.json.JSONObject
 import java.io.File
 import kotlin.math.abs
 
-private val TealPrimary = Color(0xFF7FC8BA)
-private val TealDim = Color(0xFF4A9E8E)
-private val TealMuted = Color(0xFF2A5C53)
-private val TealContainer = Color(0xFF1E3F3A)
-private val SurfaceDark = Color(0xFF16191A)
-private val BackgroundDark = Color(0xFF0F1112)
-private val SurfaceCard = Color(0xFF1E2224)
-private val SurfaceElevated = Color(0xFF252A2C)
-private val OnSurfaceLight = Color(0xFFEAECED)
-private val OnSurfaceMuted = Color(0xFF8A9196)
-private val OutlineColor = Color(0xFF3A3F42)
-private val OutlineVariantColor = Color(0xFF2C3133)
+object Tok {
+    val accent = Color(0xFF5EC6B2)
+    val accentDim = Color(0xFF3D9E8D)
+    val accentSurface = Color(0xFF1A3B36)
+    val accentOnSurface = Color(0xFFB8E8DD)
 
-private val UnifiedShape = RoundedCornerShape(12.dp)
+    val bg = Color(0xFF101314)
+    val surface = Color(0xFF181C1E)
+    val surfaceRaised = Color(0xFF1F2426)
+    val surfaceBright = Color(0xFF272D30)
+
+    val textPrimary = Color(0xFFE4E7E8)
+    val textSecondary = Color(0xFF8D9599)
+    val textMuted = Color(0xFF5C6569)
+
+    val border = Color(0xFF2A3034)
+    val borderFocus = accent
+
+    val radius = 10.dp
+    val radiusSmall = 8.dp
+
+    val sp4 = 4.dp
+    val sp6 = 6.dp
+    val sp8 = 8.dp
+    val sp12 = 12.dp
+    val sp16 = 16.dp
+    val sp20 = 20.dp
+    val sp24 = 24.dp
+
+    val shape = RoundedCornerShape(radius)
+    val shapeSmall = RoundedCornerShape(radiusSmall)
+}
 
 private val SefgColorScheme = darkColorScheme(
-    primary = TealPrimary,
+    primary = Tok.accent,
     onPrimary = Color(0xFF0A1F1B),
-    primaryContainer = TealContainer,
-    onPrimaryContainer = TealPrimary,
-    secondary = TealDim,
-    onSecondary = Color(0xFF0A1F1B),
-    secondaryContainer = TealContainer,
-    onSecondaryContainer = TealPrimary,
-    tertiary = TealDim,
-    onTertiary = Color(0xFF0A1F1B),
-    tertiaryContainer = TealContainer,
-    onTertiaryContainer = TealPrimary,
-    surface = SurfaceDark,
-    onSurface = OnSurfaceLight,
-    surfaceVariant = SurfaceCard,
-    onSurfaceVariant = OnSurfaceMuted,
-    background = BackgroundDark,
-    onBackground = OnSurfaceLight,
-    outline = OutlineColor,
-    outlineVariant = OutlineVariantColor
+    primaryContainer = Tok.accentSurface,
+    onPrimaryContainer = Tok.accentOnSurface,
+    surface = Tok.surface,
+    onSurface = Tok.textPrimary,
+    surfaceVariant = Tok.surfaceRaised,
+    onSurfaceVariant = Tok.textSecondary,
+    background = Tok.bg,
+    onBackground = Tok.textPrimary,
+    outline = Tok.border,
+    outlineVariant = Tok.border
 )
-
-@Composable
-fun Modifier.dpadFocusHighlight(focused: Boolean): Modifier {
-    return if (focused) {
-        this
-            .border(3.dp, TealPrimary, UnifiedShape)
-            .background(TealPrimary.copy(alpha = 0.08f), UnifiedShape)
-    } else this
-}
 
 data class AppEntry(
     val label: String,
     val packageName: String,
     val icon: Drawable
+)
+
+data class AppConfig(
+    var enabled: Boolean = false,
+    var targetFps: Int = 60,
+    var multiplier: Int = 2,
+    var quality: Int = 0
 )
 
 fun validOutputs(refreshHz: Int, multiplier: Int, minBase: Int = 30): List<Int> {
@@ -121,13 +130,6 @@ fun validOutputs(refreshHz: Int, multiplier: Int, minBase: Int = 30): List<Int> 
 fun snapToNearest(current: Int, valid: List<Int>): Int {
     return valid.minByOrNull { abs(it - current) } ?: valid.firstOrNull() ?: 60
 }
-
-data class AppConfig(
-    var enabled: Boolean = false,
-    var targetFps: Int = 60,
-    var multiplier: Int = 2,
-    var quality: Int = 0
-)
 
 suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
     withContext(Dispatchers.IO) {
@@ -154,19 +156,6 @@ suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
     }
 }
 
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme(colorScheme = SefgColorScheme) {
-                Surface(modifier = Modifier.fillMaxSize(), color = BackgroundDark) {
-                    ConfigScreen()
-                }
-            }
-        }
-    }
-}
-
 @Suppress("DEPRECATION")
 fun getDisplayRefreshRate(activity: ComponentActivity): Int {
     val display = if (Build.VERSION.SDK_INT >= 30) {
@@ -181,6 +170,92 @@ fun getDisplayRefreshRate(activity: ComponentActivity): Int {
         return display.refreshRate.toInt()
     }
     return 60
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme(colorScheme = SefgColorScheme) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Tok.bg) {
+                    ConfigScreen()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FocusHighlight(focused: Boolean, modifier: Modifier = Modifier): Modifier {
+    return if (focused) {
+        modifier
+            .border(2.dp, Tok.borderFocus, Tok.shape)
+            .background(Tok.accent.copy(alpha = 0.06f), Tok.shape)
+    } else modifier
+}
+
+@Composable
+fun ControlChip(
+    label: String,
+    selected: Boolean,
+    focused: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val chipFocused by interactionSource.collectIsFocusedAsState()
+    val isFocused = focused || chipFocused
+
+    Box(
+        modifier = modifier
+            .height(34.dp)
+            .clip(Tok.shapeSmall)
+            .then(
+                if (isFocused) Modifier.border(2.dp, Tok.borderFocus, Tok.shapeSmall)
+                else if (selected) Modifier.border(1.dp, Tok.accentDim.copy(alpha = 0.5f), Tok.shapeSmall)
+                else Modifier.border(1.dp, Tok.border, Tok.shapeSmall)
+            )
+            .background(
+                when {
+                    selected -> Tok.accentSurface
+                    isFocused -> Tok.surfaceBright
+                    else -> Color.Transparent
+                },
+                Tok.shapeSmall
+            )
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            color = if (selected) Tok.accentOnSurface else Tok.textSecondary
+        )
+    }
+}
+
+@Composable
+fun ControlGroup(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    Column(modifier = modifier) {
+        Text(
+            title,
+            fontSize = 11.sp,
+            color = Tok.textMuted,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.5.sp
+        )
+        Spacer(Modifier.height(Tok.sp6))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Tok.sp6),
+            content = content
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -278,19 +353,18 @@ fun ConfigScreen() {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = Tok.sp20, vertical = Tok.sp12),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 "SeFG",
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp
-                ),
-                color = TealPrimary
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Tok.accent,
+                letterSpacing = 1.sp
             )
 
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(Tok.sp16))
 
             if (searchActive) {
                 OutlinedTextField(
@@ -298,16 +372,10 @@ fun ConfigScreen() {
                     onValueChange = { searchQuery = it },
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(44.dp)
                         .focusRequester(searchFieldFocusRequester)
                         .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
-                                searchActive = false
-                                searchQuery = ""
-                                keyboardController?.hide()
-                                searchBoxFocusRequester.requestFocus()
-                                true
-                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.Back) {
+                            if (event.type == KeyEventType.KeyDown && (event.key == Key.Escape || event.key == Key.Back)) {
                                 searchActive = false
                                 searchQuery = ""
                                 keyboardController?.hide()
@@ -315,16 +383,16 @@ fun ConfigScreen() {
                                 true
                             } else false
                         },
-                    placeholder = { Text("Search apps", fontSize = 14.sp) },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    placeholder = { Text("Search", fontSize = 13.sp, color = Tok.textMuted) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp), tint = Tok.textMuted) },
                     singleLine = true,
-                    shape = UnifiedShape,
+                    shape = Tok.shape,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = TealPrimary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                        cursorColor = TealPrimary
+                        focusedBorderColor = Tok.accent,
+                        unfocusedBorderColor = Tok.border,
+                        cursorColor = Tok.accent
                     ),
-                    textStyle = MaterialTheme.typography.bodyMedium
+                    textStyle = MaterialTheme.typography.bodySmall.copy(color = Tok.textPrimary)
                 )
 
                 LaunchedEffect(Unit) {
@@ -338,56 +406,51 @@ fun ConfigScreen() {
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
-                        .clip(UnifiedShape)
-                        .dpadFocusHighlight(searchFocused)
-                        .background(
-                            if (searchFocused) SurfaceElevated else Color.Transparent,
-                            UnifiedShape
+                        .height(44.dp)
+                        .clip(Tok.shape)
+                        .then(FocusHighlight(searchFocused))
+                        .border(
+                            1.dp,
+                            if (searchFocused) Tok.borderFocus else Tok.border,
+                            Tok.shape
                         )
+                        .background(if (searchFocused) Tok.surfaceBright else Tok.surface, Tok.shape)
                         .clickable(
                             interactionSource = searchInteraction,
                             indication = null
                         ) { searchActive = true }
                         .focusRequester(searchBoxFocusRequester)
-                        .padding(horizontal = 14.dp),
+                        .padding(horizontal = Tok.sp12),
                     contentAlignment = Alignment.CenterStart
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Search,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = if (searchFocused) TealPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.width(10.dp))
+                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp), tint = Tok.textMuted)
+                        Spacer(Modifier.width(Tok.sp8))
                         Text(
-                            if (searchQuery.isNotBlank()) searchQuery else "Search apps",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (searchQuery.isNotBlank()) MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurfaceVariant
+                            if (searchQuery.isNotBlank()) searchQuery else "Search",
+                            fontSize = 13.sp,
+                            color = if (searchQuery.isNotBlank()) Tok.textPrimary else Tok.textMuted
                         )
                     }
                 }
             }
 
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(Tok.sp8))
 
             val gearInteraction = remember { MutableInteractionSource() }
             val gearFocused by gearInteraction.collectIsFocusedAsState()
 
             Box(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(UnifiedShape)
-                    .dpadFocusHighlight(gearFocused)
+                    .size(44.dp)
+                    .clip(Tok.shape)
+                    .then(
+                        if (gearFocused) Modifier.border(2.dp, Tok.borderFocus, Tok.shape)
+                        else Modifier.border(1.dp, if (advanced) Tok.accentDim else Tok.border, Tok.shape)
+                    )
                     .background(
-                        when {
-                            advanced -> TealPrimary
-                            gearFocused -> SurfaceElevated
-                            else -> SurfaceElevated
-                        },
-                        UnifiedShape
+                        if (advanced) Tok.accentSurface else Tok.surface,
+                        Tok.shape
                     )
                     .clickable(
                         interactionSource = gearInteraction,
@@ -399,40 +462,34 @@ fun ConfigScreen() {
                 Icon(
                     Icons.Default.Settings,
                     contentDescription = null,
-                    modifier = Modifier.size(22.dp),
-                    tint = if (advanced) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                    modifier = Modifier.size(18.dp),
+                    tint = if (advanced) Tok.accent else Tok.textSecondary
                 )
             }
         }
 
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 0.5.dp)
-
         if (hasRoot == false) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                shape = UnifiedShape,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = Tok.sp20, vertical = Tok.sp8)
+                    .background(Color(0xFF2D1A1A), Tok.shape)
+                    .border(1.dp, Color(0xFF5C2626), Tok.shape)
+                    .padding(Tok.sp12)
             ) {
-                Text(
-                    "Root access unavailable. Cannot read or write config.",
-                    modifier = Modifier.padding(14.dp),
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Text("No root access", fontSize = 13.sp, color = Color(0xFFE88888))
             }
         }
 
         if (apps.isEmpty() && hasRoot != null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = TealPrimary, strokeWidth = 3.dp)
+                CircularProgressIndicator(color = Tok.accent, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
             }
         } else {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 4.dp)
+                contentPadding = PaddingValues(horizontal = Tok.sp16, vertical = Tok.sp8)
             ) {
                 items(filtered, key = { it.packageName }) { app ->
                     val minBase = if (advanced) 10 else 30
@@ -443,7 +500,7 @@ fun ConfigScreen() {
                     }
                     val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = defaultOutput, multiplier = defaultMult) }
                     val isFirst = filtered.firstOrNull()?.packageName == app.packageName
-                    AppRow(
+                    AppCard(
                         app = app,
                         config = cfg,
                         refreshHz = refreshHz,
@@ -453,6 +510,7 @@ fun ConfigScreen() {
                             configs = configs.toMutableMap().also { it[app.packageName] = updated }
                         }
                     )
+                    Spacer(Modifier.height(Tok.sp6))
                 }
             }
 
@@ -463,12 +521,10 @@ fun ConfigScreen() {
             }
         }
     }
-
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRow(
+fun AppCard(
     app: AppEntry,
     config: AppConfig,
     refreshHz: Int,
@@ -480,161 +536,116 @@ fun AppRow(
     val multiplierOptions = if (advanced) listOf(1, 2, 3) else listOf(1, 2, 3).filter { validOutputs(refreshHz, it, minBase).isNotEmpty() }
     val qualityLabels = listOf("Perf", "Bal", "High")
 
-    var rowFocused by remember { mutableStateOf(false) }
+    var cardFocused by remember { mutableStateOf(false) }
 
-    val rowModifier = Modifier
-        .padding(horizontal = 12.dp, vertical = 3.dp)
-        .clip(UnifiedShape)
-        .onFocusChanged { rowFocused = it.hasFocus }
-        .dpadFocusHighlight(rowFocused)
-        .background(if (config.enabled) SurfaceCard else Color.Transparent, UnifiedShape)
-        .padding(horizontal = 12.dp, vertical = 8.dp)
+    val cardMod = Modifier
+        .fillMaxWidth()
+        .clip(Tok.shape)
+        .onFocusChanged { cardFocused = it.hasFocus }
+        .then(
+            if (cardFocused) Modifier.border(2.dp, Tok.borderFocus, Tok.shape)
+            else if (config.enabled) Modifier.border(1.dp, Tok.accentDim.copy(alpha = 0.3f), Tok.shape)
+            else Modifier.border(1.dp, Tok.border.copy(alpha = 0.5f), Tok.shape)
+        )
+        .background(if (config.enabled) Tok.surfaceRaised else Tok.surface, Tok.shape)
         .let { mod -> if (focusRequester != null) mod.focusRequester(focusRequester) else mod }
         .focusGroup()
+        .padding(Tok.sp12)
 
-    Column(modifier = rowModifier) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = cardMod) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Image(
-                bitmap = app.icon.toBitmap(96, 96).asImageBitmap(),
+                bitmap = app.icon.toBitmap(80, 80).asImageBitmap(),
                 contentDescription = null,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(32.dp)
             )
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(Tok.sp12))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     app.label,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Tok.textPrimary
                 )
                 Text(
                     app.packageName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp
+                    fontSize = 11.sp,
+                    color = Tok.textMuted
                 )
             }
             Switch(
                 checked = config.enabled,
                 onCheckedChange = { onUpdate(config.copy(enabled = it)) },
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = TealPrimary,
-                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    checkedThumbColor = Tok.bg,
+                    checkedTrackColor = Tok.accent,
+                    uncheckedThumbColor = Tok.textMuted,
                     uncheckedTrackColor = Color.Transparent,
-                    uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    uncheckedBorderColor = Tok.border
                 )
             )
         }
 
-        AnimatedVisibility(visible = config.enabled) {
-            Column(modifier = Modifier.padding(start = 48.dp, top = 6.dp, bottom = 4.dp)) {
+        AnimatedVisibility(
+            visible = config.enabled,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            Column(modifier = Modifier.padding(top = Tok.sp12)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(Tok.sp24)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Multiplier", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(4.dp))
-                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                            multiplierOptions.forEachIndexed { index, mult ->
-                                SegmentedButton(
-                                    selected = config.multiplier == mult,
-                                    onClick = {
-                                        val newValid = validOutputs(refreshHz, mult, minBase)
-                                        val snapped = snapToNearest(config.targetFps, newValid)
-                                        onUpdate(config.copy(multiplier = mult, targetFps = snapped))
-                                    },
-                                    shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size, baseShape = UnifiedShape),
-                                    icon = {},
-                                    colors = SegmentedButtonDefaults.colors(
-                                        activeContainerColor = TealContainer,
-                                        activeContentColor = TealPrimary,
-                                        inactiveContainerColor = Color.Transparent,
-                                        inactiveContentColor = OnSurfaceMuted
-                                    )
-                                ) {
-                                    Text("${mult}x", fontSize = 13.sp)
+                    ControlGroup("MULTIPLIER") {
+                        multiplierOptions.forEach { mult ->
+                            ControlChip(
+                                label = "${mult}x",
+                                selected = config.multiplier == mult,
+                                focused = false,
+                                onClick = {
+                                    val newValid = validOutputs(refreshHz, mult, minBase)
+                                    val snapped = snapToNearest(config.targetFps, newValid)
+                                    onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                                 }
-                            }
+                            )
                         }
                     }
 
                     val outputs = validOutputs(refreshHz, config.multiplier, minBase).sorted()
-                    Column(modifier = Modifier.weight(1.2f)) {
-                        Text("Output FPS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(4.dp))
-                        if (outputs.size == 1) {
-                            Box(
-                                modifier = Modifier
-                                    .height(40.dp)
-                                    .widthIn(min = 56.dp)
-                                    .border(1.dp, OutlineColor, UnifiedShape)
-                                    .background(TealContainer, UnifiedShape)
-                                    .padding(horizontal = 16.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "${outputs.first()}",
-                                    fontSize = 13.sp,
-                                    color = TealPrimary,
-                                    fontWeight = FontWeight.Medium,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        } else {
-                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                outputs.forEachIndexed { index, fps ->
-                                    SegmentedButton(
-                                        selected = config.targetFps == fps,
-                                        onClick = { onUpdate(config.copy(targetFps = fps)) },
-                                        shape = SegmentedButtonDefaults.itemShape(index, outputs.size, baseShape = UnifiedShape),
-                                        icon = {},
-                                        colors = SegmentedButtonDefaults.colors(
-                                            activeContainerColor = TealContainer,
-                                            activeContentColor = TealPrimary,
-                                            inactiveContainerColor = Color.Transparent,
-                                            inactiveContentColor = OnSurfaceMuted
-                                        )
-                                    ) {
-                                        Text("$fps", fontSize = 13.sp)
-                                    }
-                                }
-                            }
+                    ControlGroup("OUTPUT") {
+                        outputs.forEach { fps ->
+                            ControlChip(
+                                label = "$fps",
+                                selected = config.targetFps == fps,
+                                focused = false,
+                                onClick = { onUpdate(config.copy(targetFps = fps)) }
+                            )
                         }
                     }
 
                     if (config.multiplier > 1) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Quality", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.height(4.dp))
-                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                qualityLabels.forEachIndexed { index, label ->
-                                    SegmentedButton(
-                                        selected = config.quality == index,
-                                        onClick = { onUpdate(config.copy(quality = index)) },
-                                        shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size, baseShape = UnifiedShape),
-                                        icon = {},
-                                        colors = SegmentedButtonDefaults.colors(
-                                            activeContainerColor = TealContainer,
-                                            activeContentColor = TealPrimary,
-                                            inactiveContainerColor = Color.Transparent,
-                                            inactiveContentColor = OnSurfaceMuted
-                                        )
-                                    ) {
-                                        Text(label, fontSize = 12.sp)
-                                    }
-                                }
+                        ControlGroup("QUALITY") {
+                            qualityLabels.forEachIndexed { index, label ->
+                                ControlChip(
+                                    label = label,
+                                    selected = config.quality == index,
+                                    focused = false,
+                                    onClick = { onUpdate(config.copy(quality = index)) }
+                                )
                             }
                         }
                     }
                 }
 
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(Tok.sp8))
                 val base = config.targetFps / config.multiplier
                 Text(
-                    "${config.targetFps} FPS out, cap $base",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp
+                    "${config.targetFps} fps out \u00B7 cap $base",
+                    fontSize = 11.sp,
+                    color = Tok.textMuted
                 )
             }
         }
