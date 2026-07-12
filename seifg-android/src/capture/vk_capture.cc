@@ -30,6 +30,7 @@ static PFN_vkGetDeviceProcAddr g_real_gdpa = nullptr;
 static PFN_vkCreateDevice g_real_create_device = nullptr;
 static PFN_vkCreateSwapchainKHR g_real_create_swapchain = nullptr;
 static PFN_vkQueuePresentKHR g_real_present = nullptr;
+static VkInstance g_vkInstance = VK_NULL_HANDLE;
 
 typedef EGLBoolean (*PFN_eglSwapBuffers_t)(EGLDisplay, EGLSurface);
 static PFN_eglSwapBuffers_t g_orig_egl_swap = nullptr;
@@ -350,6 +351,7 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice de
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (!pName) return nullptr;
+    if (instance != VK_NULL_HANDLE && g_vkInstance == VK_NULL_HANDLE) g_vkInstance = instance;
 
     static std::atomic_flag first_call = ATOMIC_FLAG_INIT;
     if (!first_call.test_and_set()) {
@@ -401,12 +403,6 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
         }
         vkGetDeviceQueue(g_vkDevice, g_vkFamily, 0, &g_vkQueue);
 
-        if (g_real_gipa) {
-            VkInstance inst = VK_NULL_HANDLE;
-            g_real_gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-                g_real_gipa(inst, "vkGetDeviceProcAddr"));
-        }
-
         LOG("[VkGen] device recorded dev=%p phys=%p family=%u",
             reinterpret_cast<void*>(g_vkDevice),
             reinterpret_cast<void*>(g_vkPhys),
@@ -433,10 +429,19 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
 
     VkResult result = g_real_create_swapchain(device, &modCi, a, pSc);
     if (result == VK_SUCCESS && pSc) {
+        static PFN_vkGetSwapchainImagesKHR p_getSwapImages = nullptr;
+        if (!p_getSwapImages && g_real_gdpa)
+            p_getSwapImages = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(g_real_gdpa(device, "vkGetSwapchainImagesKHR"));
+        if (!p_getSwapImages && g_real_gipa && g_vkInstance)
+            p_getSwapImages = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(g_real_gipa(g_vkInstance, "vkGetSwapchainImagesKHR"));
+        if (!p_getSwapImages) {
+            ERROR("[VkGen] could not resolve vkGetSwapchainImagesKHR");
+            return result;
+        }
         uint32_t n = 0;
-        vkGetSwapchainImagesKHR(device, *pSc, &n, nullptr);
+        p_getSwapImages(device, *pSc, &n, nullptr);
         std::vector<VkImage> images(n);
-        vkGetSwapchainImagesKHR(device, *pSc, &n, images.data());
+        p_getSwapImages(device, *pSc, &n, images.data());
 
         std::lock_guard<std::mutex> lock(g_mu);
         g_swapchains[*pSc] = SwapchainInfo{
