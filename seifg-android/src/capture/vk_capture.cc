@@ -14,6 +14,7 @@
 #include <cstring>
 #include <thread>
 #include <unistd.h>
+#include <time.h>
 
 #include <dlfcn.h>
 #include "shadowhook.h"
@@ -93,6 +94,15 @@ static int g_vkH = 0;
 static VkFormat g_vkFmt = VK_FORMAT_UNDEFINED;
 
 static std::atomic<uint64_t> g_captureCount{0};
+
+static int g_cfgFps = 0;
+static int g_cfgMultiplier = 2;
+static int g_cfgQuality = 2;
+
+static constexpr int kMaxOutputs = 2;
+static AHardwareBuffer* g_ahbOutN[kMaxOutputs] = {};
+static GLuint g_texOutN[kMaxOutputs] = {};
+static GLuint g_fboOutN[kMaxOutputs] = {};
 
 static VkBuffer g_vkOutStaging = VK_NULL_HANDLE;
 static VkDeviceMemory g_vkOutStagingMem = VK_NULL_HANDLE;
@@ -246,7 +256,10 @@ static void seifg_gen_setup(EGLDisplay dpy, int w, int h) {
 
     g_ahbIn0 = alloc_ahb(w, h);
     g_ahbIn1 = alloc_ahb(w, h);
-    g_ahbOut = alloc_ahb(w, h);
+    int numOut = g_cfgMultiplier - 1;
+    for (int i = 0; i < numOut; ++i)
+        g_ahbOutN[i] = alloc_ahb(w, h);
+    g_ahbOut = g_ahbOutN[0];
     if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut) { LOG("[Gen] ahb alloc failed"); return; }
 
     GLint prevTex = 0, prevFbo = 0;
@@ -254,14 +267,26 @@ static void seifg_gen_setup(EGLDisplay dpy, int w, int h) {
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
     bool ok0 = make_ahb_fbo(dpy, g_ahbIn0, &g_texIn0, &g_fboIn0);
     bool ok1 = make_ahb_fbo(dpy, g_ahbIn1, &g_texIn1, &g_fboIn1);
-    bool ok2 = make_ahb_fbo(dpy, g_ahbOut, &g_texOut, &g_fboOut);
+    bool okOut = true;
+    for (int i = 0; i < numOut; ++i) {
+        if (!make_ahb_fbo(dpy, g_ahbOutN[i], &g_texOutN[i], &g_fboOutN[i])) {
+            okOut = false;
+            break;
+        }
+    }
+    g_texOut = g_texOutN[0];
+    g_fboOut = g_fboOutN[0];
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex));
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
-    if (!ok0 || !ok1 || !ok2) { LOG("[Gen] fbo setup failed"); return; }
+    if (!ok0 || !ok1 || !okOut) { LOG("[Gen] fbo setup failed"); return; }
 
     g_genW = w;
     g_genH = h;
-    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, {g_ahbOut},
+
+    std::vector<AHardwareBuffer*> outVec(numOut);
+    for (int i = 0; i < numOut; ++i)
+        outVec[i] = g_ahbOutN[i];
+    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
                                         VkExtent2D{static_cast<uint32_t>(w), static_cast<uint32_t>(h)},
                                         VK_FORMAT_R8G8B8A8_UNORM);
 
@@ -307,6 +332,22 @@ static EGLBoolean seifg_reinject_frame(EGLDisplay dpy, EGLSurface surf) {
     static std::atomic<uint64_t> rf{0};
     uint64_t k = rf.fetch_add(1);
 
+    if (g_cfgFps > 0) {
+        static struct timespec s_lastGl = {0, 0};
+        if (s_lastGl.tv_sec == 0 && s_lastGl.tv_nsec == 0)
+            clock_gettime(CLOCK_MONOTONIC, &s_lastGl);
+        int64_t intervalNs = 1000000000LL / g_cfgFps;
+        struct timespec target;
+        target.tv_sec = s_lastGl.tv_sec;
+        target.tv_nsec = s_lastGl.tv_nsec + intervalNs;
+        if (target.tv_nsec >= 1000000000LL) {
+            target.tv_sec += target.tv_nsec / 1000000000LL;
+            target.tv_nsec %= 1000000000LL;
+        }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target, nullptr);
+        s_lastGl = target;
+    }
+
     GLint pr = 0, pd = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &pr);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &pd);
@@ -319,10 +360,13 @@ static EGLBoolean seifg_reinject_frame(EGLDisplay dpy, EGLSurface surf) {
     seifg::presentContext(g_ctx, -1, {});
     seifg::waitIdle();
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboOut);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, g_genW, g_genH, 0, 0, g_genW, g_genH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    g_orig_egl_swap(dpy, surf);
+    int numInterp = g_cfgMultiplier - 1;
+    for (int i = 0; i < numInterp; ++i) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboOutN[i]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, g_genW, g_genH, 0, 0, g_genW, g_genH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        g_orig_egl_swap(dpy, surf);
+    }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fboIn1);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -337,7 +381,8 @@ static EGLBoolean seifg_reinject_frame(EGLDisplay dpy, EGLSurface surf) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(pd));
 
     if (k < 3 || k % 300 == 0) {
-        LOG("[Reinject] frame %llu presented mid+real", static_cast<unsigned long long>(k));
+        LOG("[Reinject] frame %llu presented %dx (interp=%d+real)",
+            static_cast<unsigned long long>(k), g_cfgMultiplier, numInterp);
     }
     return r;
 }
@@ -849,14 +894,14 @@ static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
     }
 }
 
-static VkResult vk_reinject_present_interpolated(VkQueue q, const SwapchainInfo& scInfo) {
+static VkResult vk_reinject_present_interpolated(VkQueue q, const SwapchainInfo& scInfo, AHardwareBuffer* ahbSrc) {
     if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
     if (!g_reinjectResAlloc) return VK_ERROR_INITIALIZATION_FAILED;
 
     void* ahbBase = nullptr;
     AHardwareBuffer_Desc dd{};
-    AHardwareBuffer_describe(g_ahbOut, &dd);
-    int lr = AHardwareBuffer_lock(g_ahbOut, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ahbBase);
+    AHardwareBuffer_describe(ahbSrc, &dd);
+    int lr = AHardwareBuffer_lock(ahbSrc, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ahbBase);
     if (lr != 0 || !ahbBase) return VK_ERROR_UNKNOWN;
 
     void* mapped = nullptr;
@@ -1020,11 +1065,19 @@ static void vk_capture_setup() {
     if (!g_ahbIn0) {
         g_ahbIn0 = alloc_ahb(g_vkW, g_vkH);
         g_ahbIn1 = alloc_ahb(g_vkW, g_vkH);
-        g_ahbOut = alloc_ahb(g_vkW, g_vkH);
+        int numOut = g_cfgMultiplier - 1;
+        for (int i = 0; i < numOut; ++i)
+            g_ahbOutN[i] = alloc_ahb(g_vkW, g_vkH);
+        g_ahbOut = g_ahbOutN[0];
         if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut) { LOG("[VkGen] ahb alloc failed"); return; }
     }
 
-    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, {g_ahbOut},
+    int numOut = g_cfgMultiplier - 1;
+    std::vector<AHardwareBuffer*> outVec(numOut);
+    for (int i = 0; i < numOut; ++i)
+        outVec[i] = g_ahbOutN[i];
+
+    g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
                                         VkExtent2D{extent.width, extent.height},
                                         VK_FORMAT_R8G8B8A8_UNORM);
 
@@ -1313,6 +1366,22 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
         static uint64_t s_virtPairCount = 0;
         uint32_t virtIdx = pi->pImageIndices[0];
 
+        if (g_cfgFps > 0) {
+            static struct timespec s_lastPresent = {0, 0};
+            if (s_lastPresent.tv_sec == 0 && s_lastPresent.tv_nsec == 0)
+                clock_gettime(CLOCK_MONOTONIC, &s_lastPresent);
+            int64_t intervalNs = 1000000000LL / g_cfgFps;
+            struct timespec target;
+            target.tv_sec = s_lastPresent.tv_sec;
+            target.tv_nsec = s_lastPresent.tv_nsec + intervalNs;
+            if (target.tv_nsec >= 1000000000LL) {
+                target.tv_sec += target.tv_nsec / 1000000000LL;
+                target.tv_nsec %= 1000000000LL;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target, nullptr);
+            s_lastPresent = target;
+        }
+
         if (!g_real_acquire)
             g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
 
@@ -1328,9 +1397,13 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
 
             if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
             if (g_reinjectResAlloc) {
-                VkResult intRes = vk_reinject_present_interpolated(q, scInfo);
-                if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
-                    ERROR("[VkReinject] interpolated present failed %d", intRes);
+                int numInterp = g_cfgMultiplier - 1;
+                for (int i = 0; i < numInterp; ++i) {
+                    VkResult intRes = vk_reinject_present_interpolated(q, scInfo, g_ahbOutN[i]);
+                    if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
+                        ERROR("[VkReinject] interpolated present [%d] failed %d", i, intRes);
+                        break;
+                    }
                 }
             }
 
@@ -1557,6 +1630,13 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
     return g_real_present(q, pi);
 }
 
+void SetConfig(int fps, int multiplier, int quality) {
+    g_cfgFps = fps;
+    g_cfgMultiplier = (multiplier < 2) ? 2 : (multiplier > 3) ? 3 : multiplier;
+    g_cfgQuality = (quality < 0) ? 0 : (quality > 2) ? 2 : quality;
+    LOG("[VkCapture] config fps=%d multiplier=%d quality=%d", g_cfgFps, g_cfgMultiplier, g_cfgQuality);
+}
+
 void Install() {
     static std::atomic_flag done = ATOMIC_FLAG_INIT;
     if (done.test_and_set()) return;
@@ -1589,8 +1669,10 @@ void Install() {
     }
 
     std::thread([]() {
-        seifg::initialize(0, false, 0, 2, {});
-        LOG("[seifg] initialize done device=%p phys=%p",
+        seifg::initialize(0, false, static_cast<uint32_t>(g_cfgQuality),
+                          static_cast<uint64_t>(g_cfgMultiplier), {});
+        LOG("[seifg] initialize done quality=%d multiplier=%d device=%p phys=%p",
+            g_cfgQuality, g_cfgMultiplier,
             reinterpret_cast<void*>(seifg::getDevice()),
             reinterpret_cast<void*>(seifg::getPhysicalDevice()));
         g_seifg_inited = true;

@@ -18,6 +18,8 @@ public:
     int fps_ = 90;
     bool mod_opcode_ = true;
     float scale_ = -1;
+    int multiplier_ = 2;
+    int quality_ = 2;
 
     ConfigValue(){};
     ConfigValue(int delay, int fps, bool mod_opcode, float scale)
@@ -30,10 +32,13 @@ public:
         fps_ = lhs.fps_;
         mod_opcode_ = lhs.mod_opcode_;
         scale_ = lhs.scale_;
+        multiplier_ = lhs.multiplier_;
+        quality_ = lhs.quality_;
     }
 
     void DebugPrint() const {
-        LOG("\tdelay: %d | fps: %d | mod_opcode: %d | scale: %f", delay_, fps_, mod_opcode_, scale_);
+        LOG("\tdelay: %d | fps: %d | mod_opcode: %d | scale: %f | multiplier: %d | quality: %d",
+            delay_, fps_, mod_opcode_, scale_, multiplier_, quality_);
     }
 };
 

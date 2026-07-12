@@ -5,13 +5,12 @@
 #include <jni.h>
 
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
 #include "capture/vk_capture.hh"
-#include "file_watch/dispatcher/epoller.hh"
-#include "file_watch/listener.hh"
 #include "fpslimiter.hh"
 #include "third/riru_hide/hide.hh"
 #include "utility/houdini.hh"
@@ -19,11 +18,9 @@
 
 using namespace rapidjson;
 
-static bool is_loaded = false;
-static int watch_descriptor = -1;
+static std::mutex config_mutex;
 static std::unordered_map<std::string, ConfigValue> custom_list;
 static ConfigValue global_cfg;
-static FileWatch::Listener* file_watch_listener = nullptr;
 
 constexpr const char* ConfigFile = "/data/local/tmp/TargetList.json";
 
@@ -50,6 +47,12 @@ bool LoadConfig() {
         if (auto itor2 = itor_json_object.FindMember("scale"); itor2 != itor_json_object.MemberEnd() && itor2->value.IsFloat()) {
             global_cfg.scale_ = itor2->value.GetFloat();
         }
+        if (auto itor2 = itor_json_object.FindMember("multiplier"); itor2 != itor_json_object.MemberEnd() && itor2->value.IsInt()) {
+            global_cfg.multiplier_ = itor2->value.GetInt();
+        }
+        if (auto itor2 = itor_json_object.FindMember("quality"); itor2 != itor_json_object.MemberEnd() && itor2->value.IsInt()) {
+            global_cfg.quality_ = itor2->value.GetInt();
+        }
     }
 
     if (auto itor = doc.FindMember("custom"); itor != doc.MemberEnd() && itor->value.IsObject()) {
@@ -69,6 +72,12 @@ bool LoadConfig() {
                     if (auto itor2 = item.value.FindMember("scale"); itor2 != item.value.MemberEnd() && itor2->value.IsFloat()) {
                         cfg.scale_ = itor2->value.GetFloat();
                     }
+                    if (auto itor2 = item.value.FindMember("multiplier"); itor2 != item.value.MemberEnd() && itor2->value.IsInt()) {
+                        cfg.multiplier_ = itor2->value.GetInt();
+                    }
+                    if (auto itor2 = item.value.FindMember("quality"); itor2 != item.value.MemberEnd() && itor2->value.IsInt()) {
+                        cfg.quality_ = itor2->value.GetInt();
+                    }
                 }
                 custom_list[item.name.GetString()] = cfg;
             }
@@ -82,40 +91,13 @@ bool LoadConfig() {
     return true;
 }
 
-void OnModified(int wd) {
-    if (wd == watch_descriptor) {
-        LoadConfig();
-    }
-}
-
-void OnDeleted() {
-    watch_descriptor = -1;
-}
-
-// In zygiskd memory.
 void CompanionEntry(int s) {
     std::string package_name = read_string(s);
-    if (is_loaded == false) {
-        if (LoadConfig()) {
-            is_loaded = true;
-            file_watch_listener = new FileWatch::Listener();
-            EPoller* file_watch_poller = new EPoller(file_watch_listener);
-            EPoller::reserved_list_.push_back(file_watch_poller);
-            std::thread([=] {
-                while (true) {
-                    file_watch_poller->Poll();
-                }
-            }).detach();
-            watch_descriptor = file_watch_listener->Register(ConfigFile, OnModified, OnDeleted);
-        }
-        else {
-            ERROR("LoadConfig error");
-        }
-    }
 
-    if (is_loaded && watch_descriptor == -1) {
-        watch_descriptor = file_watch_listener->Register(ConfigFile, OnModified, OnDeleted);
-    }
+    std::lock_guard<std::mutex> lock(config_mutex);
+    global_cfg = ConfigValue{};
+    custom_list.clear();
+    LoadConfig();
 
     if (auto itor = custom_list.find(package_name); itor != custom_list.end()) {
         write_int(s, 1);
@@ -123,6 +105,8 @@ void CompanionEntry(int s) {
         write_int(s, itor->second.fps_);
         write_int(s, itor->second.mod_opcode_);
         write_float(s, itor->second.scale_);
+        write_int(s, itor->second.multiplier_);
+        write_int(s, itor->second.quality_);
     }
     else {
         write_int(s, 0);
@@ -130,6 +114,8 @@ void CompanionEntry(int s) {
         write_int(s, global_cfg.fps_);
         write_int(s, global_cfg.mod_opcode_);
         write_float(s, global_cfg.scale_);
+        write_int(s, global_cfg.multiplier_);
+        write_int(s, global_cfg.quality_);
     }
 }
 
@@ -152,6 +138,8 @@ void MyModule::preAppSpecialize(AppSpecializeArgs* args) {
     current_cfg_.fps_ = read_int(client_socket);
     current_cfg_.mod_opcode_ = read_int(client_socket);
     current_cfg_.scale_ = read_float(client_socket);
+    current_cfg_.multiplier_ = read_int(client_socket);
+    current_cfg_.quality_ = read_int(client_socket);
 
     close(client_socket);
 }
@@ -220,6 +208,7 @@ void MyModule::postAppSpecialize(const AppSpecializeArgs* args) {
     bool is_target = has_custom_cfg_;
 
     if (is_target) {
+        seifg_capture::SetConfig(current_cfg_.fps_, current_cfg_.multiplier_, current_cfg_.quality_);
         seifg_capture::Install();
 
         if (current_cfg_.fps_ > 0) {
