@@ -221,7 +221,12 @@ fun ConfigScreen() {
     }
 
     val searchFocusRequester = remember { FocusRequester() }
-    val advancedFocusRequester = remember { FocusRequester() }
+    val gearFocusRequester = remember { FocusRequester() }
+    val fieldHeight = 56.dp
+
+    LaunchedEffect(Unit) {
+        try { gearFocusRequester.requestFocus() } catch (_: Exception) {}
+    }
 
     Scaffold(
         topBar = {
@@ -229,8 +234,9 @@ fun ConfigScreen() {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(fieldHeight)
                         .statusBarsPadding()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -243,22 +249,24 @@ fun ConfigScreen() {
                         onValueChange = { searchQuery = it },
                         modifier = Modifier
                             .weight(1f)
+                            .fillMaxHeight()
                             .focusRequester(searchFocusRequester),
                         placeholder = { Text("Search apps") },
                         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small
                     )
-                    Spacer(Modifier.width(12.dp))
-                    FilterChip(
-                        selected = advanced,
-                        onClick = { advanced = !advanced },
-                        label = { Text("Advanced") },
-                        leadingIcon = {
-                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                        modifier = Modifier.focusRequester(advancedFocusRequester)
-                    )
+                    Spacer(Modifier.width(8.dp))
+                    FilledIconToggleButton(
+                        checked = advanced,
+                        onCheckedChange = { advanced = it },
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(1f)
+                            .focusRequester(gearFocusRequester)
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = null)
+                    }
                 }
             }
         },
@@ -310,8 +318,8 @@ fun ConfigScreen() {
                     }
                 }
 
-                LaunchedEffect(filtered) {
-                    if (filtered.isNotEmpty()) {
+                LaunchedEffect(initialLoadDone) {
+                    if (initialLoadDone && filtered.isNotEmpty()) {
                         try { firstItemFocusRequester.requestFocus() } catch (_: Exception) {}
                     }
                 }
@@ -335,8 +343,8 @@ fun AppRow(
 
     val rowModifier = Modifier
         .padding(horizontal = 16.dp, vertical = 4.dp)
-        .focusGroup()
         .let { mod -> if (focusRequester != null) mod.focusRequester(focusRequester) else mod }
+        .focusGroup()
 
     Column(modifier = rowModifier) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
