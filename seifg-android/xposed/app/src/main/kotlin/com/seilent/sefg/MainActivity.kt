@@ -56,7 +56,7 @@ data class AppConfig(
     var enabled: Boolean = false,
     var targetFps: Int = 60,
     var multiplier: Int = 2,
-    var quality: Int = 1
+    var quality: Int = 0
 )
 
 class MainActivity : ComponentActivity() {
@@ -127,7 +127,7 @@ fun ConfigScreen() {
                                 val effMult = if (mult in validMults) mult else (validMults.maxOrNull() ?: 1)
                                 val fps = obj.optInt("fps", 30)
                                 val targetFps = obj.optInt("target_fps", fps * effMult)
-                                val quality = obj.optInt("quality", 1).coerceIn(0, 2)
+                                val quality = obj.optInt("quality", 0).coerceIn(0, 2)
                                 val valid = validOutputs(refreshHz, effMult)
                                 map[key] = AppConfig(
                                     enabled = true,
@@ -273,7 +273,7 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Image(
-                bitmap = app.icon.toBitmap(48, 48).asImageBitmap(),
+                bitmap = app.icon.toBitmap(144, 144).asImageBitmap(),
                 contentDescription = null,
                 modifier = Modifier.size(40.dp)
             )
@@ -290,43 +290,37 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
         AnimatedVisibility(visible = config.enabled) {
             Column(modifier = Modifier.padding(start = 52.dp, top = 4.dp, bottom = 8.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text("Multiplier", style = MaterialTheme.typography.labelMedium)
-                    SingleChoiceSegmentedButtonRow {
-                        multiplierOptions.forEachIndexed { index, mult ->
-                            SegmentedButton(
-                                selected = config.multiplier == mult,
-                                onClick = {
-                                    val newValid = validOutputs(refreshHz, mult)
-                                    val snapped = snapToNearest(config.targetFps, newValid)
-                                    onUpdate(config.copy(multiplier = mult, targetFps = snapped))
-                                },
-                                shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size)
-                            ) {
-                                Text("${mult}x")
-                            }
+                Text("Multiplier", style = MaterialTheme.typography.labelMedium)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    multiplierOptions.forEachIndexed { index, mult ->
+                        SegmentedButton(
+                            selected = config.multiplier == mult,
+                            onClick = {
+                                val newValid = validOutputs(refreshHz, mult)
+                                val snapped = snapToNearest(config.targetFps, newValid)
+                                onUpdate(config.copy(multiplier = mult, targetFps = snapped))
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size)
+                        ) {
+                            Text("${mult}x")
                         }
                     }
                 }
 
                 Spacer(Modifier.height(8.dp))
 
-                val outputs = validOutputs(refreshHz, config.multiplier)
+                val outputs = validOutputs(refreshHz, config.multiplier).sorted()
 
                 Text("Output FPS", style = MaterialTheme.typography.labelMedium)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    outputs.forEach { fps ->
-                        FilterChip(
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    outputs.forEachIndexed { index, fps ->
+                        SegmentedButton(
                             selected = config.targetFps == fps,
                             onClick = { onUpdate(config.copy(targetFps = fps)) },
-                            label = { Text("$fps") }
-                        )
+                            shape = SegmentedButtonDefaults.itemShape(index, outputs.size)
+                        ) {
+                            Text("$fps")
+                        }
                     }
                 }
 
