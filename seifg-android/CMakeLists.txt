@@ -75,7 +75,7 @@ if(NOT BUILD_TYPE_UP STREQUAL "DEBUG")
     target_link_options(seifg-android PRIVATE -flto -Wl,--gc-sections -Wl,--exclude-libs,ALL -s)
 endif()
 
-target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} ${GLES3_LIB} ${ANDROID_LIB} shadowhook seifg)
+target_link_libraries(seifg-android PRIVATE ${LOG_LIB} ${VK_LIB} ${EGL_LIB} ${GLES_LIB} ${GLES3_LIB} ${ANDROID_LIB} dl seifg)
 
 set_target_properties(seifg-android PROPERTIES
     PREFIX ""

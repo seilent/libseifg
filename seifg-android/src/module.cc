@@ -217,8 +217,7 @@ void MyModule::ForHoudini() {
 }
 
 void MyModule::postAppSpecialize(const AppSpecializeArgs* args) {
-    auto path = std::string("/sdcard/Android/data/") + package_name_ + "/files/il2cpp";
-    bool is_target = has_custom_cfg_ || access(path.c_str(), F_OK) == 0;
+    bool is_target = has_custom_cfg_;
 
     if (is_target) {
         seifg_capture::Install();
