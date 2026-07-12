@@ -38,9 +38,9 @@ data class AppEntry(
 fun validOutputs(refreshHz: Int, multiplier: Int): List<Int> {
     val results = mutableListOf<Int>()
     var k = 1
-    while (refreshHz / k >= 10) {
+    while (refreshHz / k >= 30) {
         val output = refreshHz / k
-        if (refreshHz % k == 0 && output % multiplier == 0 && output / multiplier >= 10) {
+        if (refreshHz % k == 0 && output % multiplier == 0 && output / multiplier >= 30) {
             results.add(output)
         }
         k++
@@ -79,13 +79,18 @@ class MainActivity : ComponentActivity() {
 
 @Suppress("DEPRECATION")
 fun getDisplayRefreshRate(activity: ComponentActivity): Int {
-    val rate = if (Build.VERSION.SDK_INT >= 30) {
-        activity.display?.refreshRate ?: 60f
+    val display = if (Build.VERSION.SDK_INT >= 30) {
+        activity.display
     } else {
         val wm = activity.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager
-        wm.defaultDisplay.refreshRate
+        wm.defaultDisplay
     }
-    return rate.toInt()
+    if (display != null) {
+        val maxRate = display.supportedModes.maxOfOrNull { it.refreshRate }
+        if (maxRate != null) return maxRate.toInt()
+        return display.refreshRate.toInt()
+    }
+    return 60
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -118,14 +123,16 @@ fun ConfigScreen() {
                             for (key in custom.keys()) {
                                 val obj = custom.getJSONObject(key)
                                 val mult = obj.optInt("multiplier", 2).coerceIn(1, 3)
+                                val validMults = listOf(1, 2, 3).filter { validOutputs(refreshHz, it).isNotEmpty() }
+                                val effMult = if (mult in validMults) mult else (validMults.maxOrNull() ?: 1)
                                 val fps = obj.optInt("fps", 30)
-                                val targetFps = obj.optInt("target_fps", fps * mult)
+                                val targetFps = obj.optInt("target_fps", fps * effMult)
                                 val quality = obj.optInt("quality", 1).coerceIn(0, 2)
-                                val valid = validOutputs(refreshHz, mult)
+                                val valid = validOutputs(refreshHz, effMult)
                                 map[key] = AppConfig(
                                     enabled = true,
                                     targetFps = snapToNearest(targetFps, valid),
-                                    multiplier = mult,
+                                    multiplier = effMult,
                                     quality = quality
                                 )
                             }
@@ -242,10 +249,12 @@ fun ConfigScreen() {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(filtered, key = { it.packageName }) { app ->
-                        val defaultOutput = validOutputs(refreshHz, 2).let { v ->
+                        val validMults = listOf(1, 2, 3).filter { validOutputs(refreshHz, it).isNotEmpty() }
+                        val defaultMult = if (2 in validMults) 2 else (validMults.maxOrNull() ?: 1)
+                        val defaultOutput = validOutputs(refreshHz, defaultMult).let { v ->
                             v.firstOrNull { it <= 60 } ?: v.firstOrNull() ?: 60
                         }
-                        val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = defaultOutput) }
+                        val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = defaultOutput, multiplier = defaultMult) }
                         AppRow(app, cfg, refreshHz) { updated ->
                             configs = configs.toMutableMap().also { it[app.packageName] = updated }
                         }
@@ -258,9 +267,8 @@ fun ConfigScreen() {
 
 @Composable
 fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfig) -> Unit) {
-    val multiplierOptions = listOf(1, 2, 3)
+    val multiplierOptions = listOf(1, 2, 3).filter { validOutputs(refreshHz, it).isNotEmpty() }
     val qualityLabels = listOf("Performance", "Balanced", "High")
-    val can3x = refreshHz > 60
 
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -292,25 +300,16 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
                             SegmentedButton(
                                 selected = config.multiplier == mult,
                                 onClick = {
-                                    if (mult == 3 && !can3x) return@SegmentedButton
                                     val newValid = validOutputs(refreshHz, mult)
                                     val snapped = snapToNearest(config.targetFps, newValid)
                                     onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                                 },
-                                shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size),
-                                enabled = mult == 1 || mult == 2 || can3x
+                                shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size)
                             ) {
                                 Text("${mult}x")
                             }
                         }
                     }
-                }
-                if (!can3x) {
-                    Text(
-                        "3x needs a >60 Hz display",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
 
                 Spacer(Modifier.height(8.dp))
