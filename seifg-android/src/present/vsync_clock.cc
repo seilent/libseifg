@@ -45,9 +45,13 @@ void VsyncClock::frameCallback(int64_t frameTimeNanos, void* data) {
 
 void VsyncClock::onVsync(int64_t frameTimeNanos) {
     if (prevVsync != 0) {
-        const int64_t delta = frameTimeNanos - prevVsync;
+        int64_t delta = frameTimeNanos - prevVsync;
+        const int64_t cur = period.load(std::memory_order_relaxed);
+        if (cur > 0) {
+            const int64_t n = (delta + cur / 2) / cur;
+            if (n >= 1) delta /= n;
+        }
         if (delta > kMinPeriodNs && delta < kMaxPeriodNs) {
-            const int64_t cur = period.load(std::memory_order_relaxed);
             period.store(cur == 0 ? delta : (cur * 7 + delta) / 8, std::memory_order_relaxed);
         }
     }

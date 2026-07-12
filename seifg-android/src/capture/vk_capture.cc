@@ -1484,6 +1484,8 @@ static int64_t nowNsCapture() {
 static void framegen_thread_loop() {
     LOG("[FgThread] started");
     uint64_t prevProcessedSeq = 0;
+    static int64_t s_cyGenSum = 0, s_cySnapSum = 0, s_cyPresSum = 0, s_cyCycleSum = 0, s_cyLockSum = 0;
+    static int s_cyCount = 0;
     while (true) {
         FgRequest req;
         {
@@ -1501,6 +1503,8 @@ static void framegen_thread_loop() {
             continue;
         }
 
+        int64_t tCycleStart = nowNsCapture();
+
         g_instr.lastPrevSeq.store(prevProcessedSeq, std::memory_order_relaxed);
         g_instr.lastCurSeq.store(req.seq, std::memory_order_relaxed);
         if (prevProcessedSeq > 0) {
@@ -1510,10 +1514,14 @@ static void framegen_thread_loop() {
         }
         prevProcessedSeq = req.seq;
 
+        int64_t tLockBefore = nowNsCapture();
         {
             std::lock_guard<std::mutex> blk(g_fgBufMutex);
+            int64_t tLockAfter = nowNsCapture();
+            int64_t tGenStart = tLockAfter;
             seifg::presentContext(g_ctx, -1, {});
             seifg::waitIdle();
+            int64_t tGenEnd = nowNsCapture();
 
             bool snapGpu = g_ahbImportAvailable && g_ahbImagesImported;
             if (snapGpu) {
@@ -1599,6 +1607,8 @@ static void framegen_thread_loop() {
                 AHardwareBuffer_unlock(g_ahbReal, nullptr);
             }
 
+            int64_t tSnapEnd = nowNsCapture();
+
             if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
                 dump_ahb(g_ahbIn0, "seifg_in0.png", false);
                 dump_ahb(g_ahbIn1, "seifg_in1.png", false);
@@ -1606,14 +1616,31 @@ static void framegen_thread_loop() {
                 LOG("[FgThread] triggered dump");
                 unlink(g_triggerPath);
             }
+
+            s_cyGenSum += tGenEnd - tGenStart;
+            s_cySnapSum += tSnapEnd - tGenEnd;
+            s_cyLockSum += tLockAfter - tLockBefore;
         }
 
         g_instr.generated.fetch_add(1, std::memory_order_relaxed);
 
+        int64_t tPresStart = nowNsCapture();
         const int numInterp = g_cfgMultiplier - 1;
         const int64_t period = g_scPresenter.clock().periodNs();
         if (period <= 0) {
             g_scPresenter.presentOne(g_ahbReal, 0);
+            int64_t tPresEnd = nowNsCapture();
+            s_cyPresSum += tPresEnd - tPresStart;
+            s_cyCycleSum += tPresEnd - tCycleStart;
+            s_cyCount++;
+            if (s_cyCount >= 60) {
+                LOG("[FgCycle] gen=%.1f snap=%.1f present=%.1f lock=%.1f cycle=%.1f ms (n=60)",
+                    (double)s_cyGenSum / 60.0 / 1e6, (double)s_cySnapSum / 60.0 / 1e6,
+                    (double)s_cyPresSum / 60.0 / 1e6, (double)s_cyLockSum / 60.0 / 1e6,
+                    (double)s_cyCycleSum / 60.0 / 1e6);
+                s_cyGenSum = s_cySnapSum = s_cyPresSum = s_cyCycleSum = s_cyLockSum = 0;
+                s_cyCount = 0;
+            }
             framegen_instr_tick();
             continue;
         }
@@ -1632,6 +1659,19 @@ static void framegen_thread_loop() {
         g_scPresenter.presentOne(g_ahbReal, base + static_cast<int64_t>(numInterp) * spacing);
 
         g_scPresenter.commitBurst(base + static_cast<int64_t>(m) * spacing - period);
+
+        int64_t tPresEnd = nowNsCapture();
+        s_cyPresSum += tPresEnd - tPresStart;
+        s_cyCycleSum += tPresEnd - tCycleStart;
+        s_cyCount++;
+        if (s_cyCount >= 60) {
+            LOG("[FgCycle] gen=%.1f snap=%.1f present=%.1f lock=%.1f cycle=%.1f ms (n=60)",
+                (double)s_cyGenSum / 60.0 / 1e6, (double)s_cySnapSum / 60.0 / 1e6,
+                (double)s_cyPresSum / 60.0 / 1e6, (double)s_cyLockSum / 60.0 / 1e6,
+                (double)s_cyCycleSum / 60.0 / 1e6);
+            s_cyGenSum = s_cySnapSum = s_cyPresSum = s_cyCycleSum = s_cyLockSum = 0;
+            s_cyCount = 0;
+        }
 
         framegen_instr_tick();
     }
@@ -1833,15 +1873,9 @@ static void acquire_rate_cap() {
         now = nowNsCapture();
     }
 
-    int64_t lastVsync = g_scPresenter.clock().lastVsyncNs();
-    int64_t base = (now > g_nextAcquireNs) ? now : g_nextAcquireNs;
-    int64_t next = base + intervalNs;
-    if (lastVsync > 0 && P > 0) {
-        int64_t off = (next - lastVsync) % P;
-        if (off < 0) off += P;
-        if (off != 0) next += P - off;
-    }
-    g_nextAcquireNs = next;
+    g_nextAcquireNs += intervalNs;
+    if (g_nextAcquireNs < now)
+        g_nextAcquireNs = now + intervalNs;
 }
 
 static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
@@ -2140,7 +2174,7 @@ void SetConfig(int fps, int multiplier, int quality) {
     g_cfgFps = fps;
     g_cfgMultiplier = (multiplier < 2) ? 2 : (multiplier > 3) ? 3 : multiplier;
     g_cfgQuality = (quality < 0) ? 0 : (quality > 2) ? 2 : quality;
-    LOG("[VkCapture] config fps=%d multiplier=%d quality=%d", g_cfgFps, g_cfgMultiplier, g_cfgQuality);
+    LOG("[VkCapture] build=%s %s config fps=%d multiplier=%d quality=%d", __DATE__, __TIME__, g_cfgFps, g_cfgMultiplier, g_cfgQuality);
 }
 
 void SetTargetFps(int targetFps) {
@@ -2183,8 +2217,12 @@ void Install() {
     std::thread([]() {
         seifg::initialize(0, false, static_cast<uint32_t>(g_cfgQuality),
                           static_cast<uint64_t>(g_cfgMultiplier), {});
-        LOG("[seifg] initialize done quality=%d multiplier=%d device=%p phys=%p",
-            g_cfgQuality, g_cfgMultiplier,
+        int level = 3 - g_cfgQuality;
+        if (level < 1) level = 1;
+        if (level > 3) level = 3;
+        seifg::setFlowDownscale(static_cast<uint32_t>(level));
+        LOG("[seifg] initialize done quality=%d multiplier=%d upscaleOnlyLevels=%d device=%p phys=%p",
+            g_cfgQuality, g_cfgMultiplier, level,
             reinterpret_cast<void*>(seifg::getDevice()),
             reinterpret_cast<void*>(seifg::getPhysicalDevice()));
         g_seifg_inited = true;

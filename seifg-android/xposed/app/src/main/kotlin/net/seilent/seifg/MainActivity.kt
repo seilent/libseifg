@@ -56,7 +56,7 @@ data class AppConfig(
     var enabled: Boolean = false,
     var targetFps: Int = 60,
     var multiplier: Int = 2,
-    var quality: Int = 2
+    var quality: Int = 1
 )
 
 class MainActivity : ComponentActivity() {
@@ -259,7 +259,7 @@ fun ConfigScreen() {
 @Composable
 fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfig) -> Unit) {
     val multiplierOptions = listOf(2, 3)
-    val qualityLabels = listOf("Performance", "Balanced", "Quality")
+    val qualityLabels = listOf("Performance", "Balanced", "High")
     val can3x = refreshHz > 60
 
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
@@ -333,7 +333,7 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
                 Spacer(Modifier.height(8.dp))
 
-                Text("Quality", style = MaterialTheme.typography.labelMedium)
+                Text("Flow quality", style = MaterialTheme.typography.labelMedium)
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     qualityLabels.forEachIndexed { index, label ->
                         SegmentedButton(
