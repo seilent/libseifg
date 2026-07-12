@@ -5,15 +5,15 @@ plugins {
 }
 
 android {
-    namespace = "net.seilent.seifg"
+    namespace = "com.seilent.sefg"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "net.seilent.seifg"
+        applicationId = "com.seilent.sefg"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1-capture"
+        versionName = "0.1"
         ndk {
             abiFilters += "arm64-v8a"
         }

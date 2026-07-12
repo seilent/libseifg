@@ -1,4 +1,4 @@
-package net.seilent.seifg
+package com.seilent.sefg
 
 import android.content.Context
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -27,7 +27,7 @@ class XposedEntry : IXposedHookLoadPackage {
                     val context = param.args[0] as Context
                     try {
                         val dir = context.packageManager
-                            .getApplicationInfo("net.seilent.seifg", 0)
+                            .getApplicationInfo("com.seilent.sefg", 0)
                             .nativeLibraryDir
                         System.load("$dir/libshadowhook_nothing.so")
                         System.load("$dir/libshadowhook.so")

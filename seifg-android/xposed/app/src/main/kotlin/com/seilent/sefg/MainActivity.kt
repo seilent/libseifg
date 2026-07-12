@@ -1,4 +1,4 @@
-package net.seilent.seifg
+package com.seilent.sefg
 
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -117,10 +117,10 @@ fun ConfigScreen() {
                             val map = mutableMapOf<String, AppConfig>()
                             for (key in custom.keys()) {
                                 val obj = custom.getJSONObject(key)
-                                val mult = obj.optInt("multiplier", 2).coerceIn(2, 3)
+                                val mult = obj.optInt("multiplier", 2).coerceIn(1, 3)
                                 val fps = obj.optInt("fps", 30)
                                 val targetFps = obj.optInt("target_fps", fps * mult)
-                                val quality = obj.optInt("quality", 2).coerceIn(0, 2)
+                                val quality = obj.optInt("quality", 1).coerceIn(0, 2)
                                 val valid = validOutputs(refreshHz, mult)
                                 map[key] = AppConfig(
                                     enabled = true,
@@ -163,7 +163,7 @@ fun ConfigScreen() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("seifg") },
+                title = { Text("SeFG") },
                 actions = {
                     TextButton(
                         onClick = {
@@ -258,7 +258,7 @@ fun ConfigScreen() {
 
 @Composable
 fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfig) -> Unit) {
-    val multiplierOptions = listOf(2, 3)
+    val multiplierOptions = listOf(1, 2, 3)
     val qualityLabels = listOf("Performance", "Balanced", "High")
     val can3x = refreshHz > 60
 
@@ -298,7 +298,7 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
                                     onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size),
-                                enabled = mult != 3 || can3x
+                                enabled = mult == 1 || mult == 2 || can3x
                             ) {
                                 Text("${mult}x")
                             }
@@ -333,20 +333,22 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
                 Spacer(Modifier.height(8.dp))
 
-                Text("Flow quality", style = MaterialTheme.typography.labelMedium)
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    qualityLabels.forEachIndexed { index, label ->
-                        SegmentedButton(
-                            selected = config.quality == index,
-                            onClick = { onUpdate(config.copy(quality = index)) },
-                            shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size)
-                        ) {
-                            Text(label, style = MaterialTheme.typography.labelSmall)
+                if (config.multiplier > 1) {
+                    Text("Flow quality", style = MaterialTheme.typography.labelMedium)
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        qualityLabels.forEachIndexed { index, label ->
+                            SegmentedButton(
+                                selected = config.quality == index,
+                                onClick = { onUpdate(config.copy(quality = index)) },
+                                shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size)
+                            ) {
+                                Text(label, style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
-                }
 
-                Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(8.dp))
+                }
 
                 val base = config.targetFps / config.multiplier
                 Text(

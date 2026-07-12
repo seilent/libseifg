@@ -1,4 +1,4 @@
-package net.seilent.seifg
+package com.seilent.sefg
 
 object NativeBridge {
     external fun install()

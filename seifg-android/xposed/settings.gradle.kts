@@ -21,5 +21,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "seifg-xposed"
+rootProject.name = "sefg-xposed"
 include(":app")
