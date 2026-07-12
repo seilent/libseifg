@@ -220,35 +220,49 @@ fun ConfigScreen() {
         }
     }
 
+    val searchFocusRequester = remember { FocusRequester() }
+    val advancedFocusRequester = remember { FocusRequester() }
+
     Scaffold(
         topBar = {
             Surface(tonalElevation = 3.dp) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 12.dp)
+                        .padding(top = 8.dp, bottom = 4.dp)
                 ) {
-                    Text("SeFG", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.width(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "SeFG",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(Modifier.weight(1f))
+                        FilterChip(
+                            selected = advanced,
+                            onClick = { advanced = !advanced },
+                            label = { Text("Advanced") },
+                            leadingIcon = {
+                                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                            modifier = Modifier.focusRequester(advancedFocusRequester)
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        modifier = Modifier.weight(1f).height(44.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(searchFocusRequester),
                         placeholder = { Text("Search apps") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    FilterChip(
-                        selected = advanced,
-                        onClick = { advanced = !advanced },
-                        label = { Text("Advanced") },
-                        leadingIcon = {
-                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        }
                     )
                 }
             }
