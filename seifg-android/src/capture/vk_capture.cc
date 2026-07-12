@@ -16,7 +16,6 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
-#include <chrono>
 #include <unistd.h>
 #include <time.h>
 
@@ -126,6 +125,37 @@ static std::atomic<uint64_t> g_captureCount{0};
 static int g_cfgFps = 0;
 static int g_cfgMultiplier = 2;
 static int g_cfgQuality = 2;
+static int g_cfgTargetFps = 0;
+
+static std::atomic<int64_t> g_renderIntervalNs{0};
+static std::atomic<int64_t> g_presentSpacingNs{0};
+static std::atomic<int> g_pacingK{1};
+static int64_t g_lastPeriodNs = 0;
+
+static ScPresenter g_scPresenter;
+
+static void recomputePacing() {
+    int64_t P = g_scPresenter.clock().periodNs();
+    if (P <= 0 || g_cfgTargetFps <= 0) return;
+    if (g_lastPeriodNs != 0 && llabs(P - g_lastPeriodNs) * 8 < g_lastPeriodNs) return;
+    int64_t R = (1000000000LL + P / 2) / P;
+    int m = g_cfgMultiplier;
+    int k = static_cast<int>((R + g_cfgTargetFps / 2) / g_cfgTargetFps);
+    if (k < 1) k = 1;
+    int64_t baseFps = R / (static_cast<int64_t>(k) * m);
+    if (baseFps < 10) {
+        k = static_cast<int>(R / (10LL * m));
+        if (k < 1) k = 1;
+    }
+    g_pacingK.store(k, std::memory_order_relaxed);
+    g_renderIntervalNs.store(static_cast<int64_t>(k) * m * P, std::memory_order_relaxed);
+    g_presentSpacingNs.store(static_cast<int64_t>(k) * P, std::memory_order_relaxed);
+    g_lastPeriodNs = P;
+    LOG("[Pacing] P=%lld R=%lld k=%d m=%d renderInterval=%lld presentSpacing=%lld",
+        (long long)P, (long long)R, k, m,
+        (long long)(static_cast<int64_t>(k) * m * P),
+        (long long)(static_cast<int64_t>(k) * P));
+}
 
 static AHardwareBuffer* g_ahbOutN[kMaxOutputs] = {};
 static GLuint g_texOutN[kMaxOutputs] = {};
@@ -157,14 +187,11 @@ static std::mutex g_mu;
 
 static std::unordered_map<VkSurfaceKHR, ANativeWindow*> g_surfaceWindowMap;
 static std::unordered_map<VkSwapchainKHR, ANativeWindow*> g_swapchainWindowMap;
-static ScPresenter g_scPresenter;
 static std::mutex g_scMu;
 
 static std::thread g_fgThread;
 static std::mutex g_fgMutex;
 static std::condition_variable g_fgCv;
-static std::condition_variable g_fgReadyCv;
-static bool g_fgReady = true;
 static std::atomic<bool> g_fgRunning{false};
 static bool g_fgPendingValid = false;
 static std::mutex g_fgBufMutex;
@@ -176,6 +203,7 @@ struct FgRequest {
 static FgRequest g_fgPending;
 
 static std::atomic<uint64_t> g_fgSeq{0};
+static int64_t g_nextAcquireNs = 0;
 
 struct FgInstrStats {
     std::atomic<uint64_t> captured{0};
@@ -1092,6 +1120,7 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     LOG("[VkReinject] virtualized swapchain %ux%u fmt=%d virtualImages=%u realImages=%u",
         ci->imageExtent.width, ci->imageExtent.height,
         static_cast<int>(ci->imageFormat), realCount, realCount);
+    g_nextAcquireNs = 0;
     return VK_SUCCESS;
 }
 
@@ -1469,11 +1498,6 @@ static void framegen_thread_loop() {
         }
 
         if (!g_vk_gen_ready.load() || g_ctx < 0) {
-            {
-                std::lock_guard<std::mutex> lk(g_fgMutex);
-                g_fgReady = true;
-            }
-            g_fgReadyCv.notify_one();
             continue;
         }
 
@@ -1590,38 +1614,24 @@ static void framegen_thread_loop() {
         const int64_t period = g_scPresenter.clock().periodNs();
         if (period <= 0) {
             g_scPresenter.presentOne(g_ahbReal, 0);
-            {
-                std::lock_guard<std::mutex> lk(g_fgMutex);
-                g_fgReady = true;
-            }
-            g_fgReadyCv.notify_one();
             framegen_instr_tick();
             continue;
         }
 
-        int64_t k = g_scPresenter.nextVsyncSlot();
-        const int64_t now = nowNsCapture();
-        if (k <= now)
-            k = now + period;
+        recomputePacing();
 
-        g_scPresenter.presentOne(g_ahbOutN[0], k);
-        for (int i = 1; i <= numInterp; i++) {
-            g_scPresenter.busyWaitUntil(k + (int64_t)(i - 1) * period);
-            const int64_t target = k + (int64_t)i * period;
-            if (i < numInterp) {
-                g_scPresenter.presentOne(g_ahbOutN[i], target);
-            } else {
-                g_scPresenter.presentOne(g_ahbReal, target);
-            }
+        int64_t spacing = g_presentSpacingNs.load(std::memory_order_relaxed);
+        if (spacing <= 0) spacing = period;
+
+        int64_t base = g_scPresenter.nextVsyncSlot();
+        int m = g_cfgMultiplier;
+
+        for (int i = 0; i < numInterp; ++i) {
+            g_scPresenter.presentOne(g_ahbOutN[i], base + static_cast<int64_t>(i) * spacing);
         }
+        g_scPresenter.presentOne(g_ahbReal, base + static_cast<int64_t>(numInterp) * spacing);
 
-        g_scPresenter.commitBurst(k + (int64_t)numInterp * period);
-
-        {
-            std::lock_guard<std::mutex> lk(g_fgMutex);
-            g_fgReady = true;
-        }
-        g_fgReadyCv.notify_one();
+        g_scPresenter.commitBurst(base + static_cast<int64_t>(m) * spacing - period);
 
         framegen_instr_tick();
     }
@@ -1637,9 +1647,7 @@ static void start_framegen_thread() {
 static void stop_framegen_thread() {
     if (g_fgRunning.exchange(false)) {
         std::lock_guard<std::mutex> lk(g_fgMutex);
-        g_fgReady = true;
         g_fgCv.notify_all();
-        g_fgReadyCv.notify_all();
     }
     if (g_fgThread.joinable()) g_fgThread.join();
 }
@@ -1795,6 +1803,47 @@ static VkResult VKAPI_CALL hooked_GetSwapchainImagesKHR(
     return g_real_get_swapchain_images(device, swapchain, pSwapchainImageCount, pSwapchainImages);
 }
 
+static void acquire_rate_cap() {
+    int64_t P = g_scPresenter.clock().periodNs();
+    if (P <= 0) return;
+
+    recomputePacing();
+
+    int64_t intervalNs = g_renderIntervalNs.load(std::memory_order_relaxed);
+    if (intervalNs <= 0) return;
+
+    int64_t now = nowNsCapture();
+
+    if (g_nextAcquireNs == 0) {
+        int64_t lastVsync = g_scPresenter.clock().lastVsyncNs();
+        if (lastVsync > 0) {
+            int64_t slots = (now - lastVsync + P - 1) / P;
+            g_nextAcquireNs = lastVsync + slots * P;
+        } else {
+            g_nextAcquireNs = now;
+        }
+        return;
+    }
+
+    if (now < g_nextAcquireNs) {
+        struct timespec ts;
+        ts.tv_sec = g_nextAcquireNs / 1000000000LL;
+        ts.tv_nsec = g_nextAcquireNs % 1000000000LL;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+        now = nowNsCapture();
+    }
+
+    int64_t lastVsync = g_scPresenter.clock().lastVsyncNs();
+    int64_t base = (now > g_nextAcquireNs) ? now : g_nextAcquireNs;
+    int64_t next = base + intervalNs;
+    if (lastVsync > 0 && P > 0) {
+        int64_t off = (next - lastVsync) % P;
+        if (off < 0) off += P;
+        if (off != 0) next += P - off;
+    }
+    g_nextAcquireNs = next;
+}
+
 static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
     VkDevice device,
     VkSwapchainKHR swapchain,
@@ -1824,13 +1873,7 @@ static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
         return g_real_acquire(device, swapchain, timeout, semaphore, fence, pImageIndex);
     }
 
-    if (g_fgRunning.load(std::memory_order_relaxed)) {
-        std::unique_lock<std::mutex> lk(g_fgMutex);
-        g_fgReadyCv.wait_for(lk, std::chrono::milliseconds(50), [] {
-            return g_fgReady || !g_fgRunning.load(std::memory_order_relaxed);
-        });
-        g_fgReady = false;
-    }
+    acquire_rate_cap();
 
     *pImageIndex = idx;
 
@@ -1874,13 +1917,7 @@ static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
         return g_real_acquire2(device, pAcquireInfo, pImageIndex);
     }
 
-    if (g_fgRunning.load(std::memory_order_relaxed)) {
-        std::unique_lock<std::mutex> lk(g_fgMutex);
-        g_fgReadyCv.wait_for(lk, std::chrono::milliseconds(50), [] {
-            return g_fgReady || !g_fgRunning.load(std::memory_order_relaxed);
-        });
-        g_fgReady = false;
-    }
+    acquire_rate_cap();
 
     *pImageIndex = idx;
 
@@ -2104,6 +2141,12 @@ void SetConfig(int fps, int multiplier, int quality) {
     g_cfgMultiplier = (multiplier < 2) ? 2 : (multiplier > 3) ? 3 : multiplier;
     g_cfgQuality = (quality < 0) ? 0 : (quality > 2) ? 2 : quality;
     LOG("[VkCapture] config fps=%d multiplier=%d quality=%d", g_cfgFps, g_cfgMultiplier, g_cfgQuality);
+}
+
+void SetTargetFps(int targetFps) {
+    g_cfgTargetFps = targetFps;
+    recomputePacing();
+    LOG("[VkCapture] targetFps=%d", g_cfgTargetFps);
 }
 
 void Install() {

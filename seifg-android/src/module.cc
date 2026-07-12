@@ -53,6 +53,9 @@ bool LoadConfig() {
         if (auto itor2 = itor_json_object.FindMember("quality"); itor2 != itor_json_object.MemberEnd() && itor2->value.IsInt()) {
             global_cfg.quality_ = itor2->value.GetInt();
         }
+        if (auto itor2 = itor_json_object.FindMember("target_fps"); itor2 != itor_json_object.MemberEnd() && itor2->value.IsInt()) {
+            global_cfg.target_fps_ = itor2->value.GetInt();
+        }
     }
 
     if (auto itor = doc.FindMember("custom"); itor != doc.MemberEnd() && itor->value.IsObject()) {
@@ -77,6 +80,9 @@ bool LoadConfig() {
                     }
                     if (auto itor2 = item.value.FindMember("quality"); itor2 != item.value.MemberEnd() && itor2->value.IsInt()) {
                         cfg.quality_ = itor2->value.GetInt();
+                    }
+                    if (auto itor2 = item.value.FindMember("target_fps"); itor2 != item.value.MemberEnd() && itor2->value.IsInt()) {
+                        cfg.target_fps_ = itor2->value.GetInt();
                     }
                 }
                 custom_list[item.name.GetString()] = cfg;
@@ -107,6 +113,7 @@ void CompanionEntry(int s) {
         write_float(s, itor->second.scale_);
         write_int(s, itor->second.multiplier_);
         write_int(s, itor->second.quality_);
+        write_int(s, itor->second.target_fps_);
     }
     else {
         write_int(s, 0);
@@ -116,6 +123,7 @@ void CompanionEntry(int s) {
         write_float(s, global_cfg.scale_);
         write_int(s, global_cfg.multiplier_);
         write_int(s, global_cfg.quality_);
+        write_int(s, global_cfg.target_fps_);
     }
 }
 
@@ -140,6 +148,7 @@ void MyModule::preAppSpecialize(AppSpecializeArgs* args) {
     current_cfg_.scale_ = read_float(client_socket);
     current_cfg_.multiplier_ = read_int(client_socket);
     current_cfg_.quality_ = read_int(client_socket);
+    current_cfg_.target_fps_ = read_int(client_socket);
 
     close(client_socket);
 }
@@ -209,6 +218,7 @@ void MyModule::postAppSpecialize(const AppSpecializeArgs* args) {
 
     if (is_target) {
         seifg_capture::SetConfig(current_cfg_.fps_, current_cfg_.multiplier_, current_cfg_.quality_);
+        seifg_capture::SetTargetFps(current_cfg_.target_fps_);
         seifg_capture::Install();
 
         if (current_cfg_.fps_ > 0) {

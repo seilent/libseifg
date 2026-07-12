@@ -27,13 +27,30 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-import kotlin.math.roundToInt
+import kotlin.math.abs
 
 data class AppEntry(
     val label: String,
     val packageName: String,
     val icon: Drawable
 )
+
+fun validOutputs(refreshHz: Int, multiplier: Int): List<Int> {
+    val results = mutableListOf<Int>()
+    var k = 1
+    while (refreshHz / k >= 10) {
+        val output = refreshHz / k
+        if (refreshHz % k == 0 && output % multiplier == 0 && output / multiplier >= 10) {
+            results.add(output)
+        }
+        k++
+    }
+    return results
+}
+
+fun snapToNearest(current: Int, valid: List<Int>): Int {
+    return valid.minByOrNull { abs(it - current) } ?: valid.firstOrNull() ?: 60
+}
 
 data class AppConfig(
     var enabled: Boolean = false,
@@ -100,15 +117,16 @@ fun ConfigScreen() {
                             val map = mutableMapOf<String, AppConfig>()
                             for (key in custom.keys()) {
                                 val obj = custom.getJSONObject(key)
-                                val mult = obj.optInt("multiplier", 2)
+                                val mult = obj.optInt("multiplier", 2).coerceIn(2, 3)
                                 val fps = obj.optInt("fps", 30)
                                 val targetFps = obj.optInt("target_fps", fps * mult)
-                                val quality = obj.optInt("quality", 2)
+                                val quality = obj.optInt("quality", 2).coerceIn(0, 2)
+                                val valid = validOutputs(refreshHz, mult)
                                 map[key] = AppConfig(
                                     enabled = true,
-                                    targetFps = targetFps.coerceIn(30, refreshHz),
-                                    multiplier = mult.coerceIn(2, 3),
-                                    quality = quality.coerceIn(0, 2)
+                                    targetFps = snapToNearest(targetFps, valid),
+                                    multiplier = mult,
+                                    quality = quality
                                 )
                             }
                             configs = map
@@ -155,9 +173,8 @@ fun ConfigScreen() {
                                 val custom = JSONObject()
                                 for ((pkg, cfg) in configs) {
                                     if (cfg.enabled) {
-                                        val cap = maxOf(1, (cfg.targetFps.toFloat() / cfg.multiplier).roundToInt())
                                         val entry = JSONObject()
-                                        entry.put("fps", cap)
+                                        entry.put("fps", cfg.targetFps / cfg.multiplier)
                                         entry.put("multiplier", cfg.multiplier)
                                         entry.put("quality", cfg.quality)
                                         entry.put("target_fps", cfg.targetFps)
@@ -225,7 +242,10 @@ fun ConfigScreen() {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(filtered, key = { it.packageName }) { app ->
-                        val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = minOf(60, refreshHz)) }
+                        val defaultOutput = validOutputs(refreshHz, 2).let { v ->
+                            v.firstOrNull { it <= 60 } ?: v.firstOrNull() ?: 60
+                        }
+                        val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = defaultOutput) }
                         AppRow(app, cfg, refreshHz) { updated ->
                             configs = configs.toMutableMap().also { it[app.packageName] = updated }
                         }
@@ -273,7 +293,9 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
                                 selected = config.multiplier == mult,
                                 onClick = {
                                     if (mult == 3 && !can3x) return@SegmentedButton
-                                    onUpdate(config.copy(multiplier = mult))
+                                    val newValid = validOutputs(refreshHz, mult)
+                                    val snapped = snapToNearest(config.targetFps, newValid)
+                                    onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size),
                                 enabled = mult != 3 || can3x
@@ -293,31 +315,20 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
                 Spacer(Modifier.height(8.dp))
 
-                Text("Target FPS: ${config.targetFps}", style = MaterialTheme.typography.labelMedium)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = {
-                            val newVal = (config.targetFps - 5).coerceIn(30, refreshHz)
-                            onUpdate(config.copy(targetFps = newVal))
-                        },
-                        contentPadding = PaddingValues(0.dp),
-                        modifier = Modifier.size(36.dp)
-                    ) { Text("-") }
-                    Slider(
-                        value = config.targetFps.toFloat(),
-                        onValueChange = { onUpdate(config.copy(targetFps = (it / 5).roundToInt() * 5)) },
-                        valueRange = 30f..refreshHz.toFloat(),
-                        steps = ((refreshHz - 30) / 5) - 1,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(
-                        onClick = {
-                            val newVal = (config.targetFps + 5).coerceIn(30, refreshHz)
-                            onUpdate(config.copy(targetFps = newVal))
-                        },
-                        contentPadding = PaddingValues(0.dp),
-                        modifier = Modifier.size(36.dp)
-                    ) { Text("+") }
+                val outputs = validOutputs(refreshHz, config.multiplier)
+
+                Text("Output FPS", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    outputs.forEach { fps ->
+                        FilterChip(
+                            selected = config.targetFps == fps,
+                            onClick = { onUpdate(config.copy(targetFps = fps)) },
+                            label = { Text("$fps") }
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -337,9 +348,9 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
                 Spacer(Modifier.height(8.dp))
 
-                val cap = maxOf(1, (config.targetFps.toFloat() / config.multiplier).roundToInt())
+                val base = config.targetFps / config.multiplier
                 Text(
-                    "Output ${config.targetFps} FPS  |  render cap $cap FPS",
+                    "Output ${config.targetFps} FPS  |  render cap $base FPS",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

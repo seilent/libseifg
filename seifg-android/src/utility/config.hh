@@ -20,6 +20,7 @@ public:
     float scale_ = -1;
     int multiplier_ = 2;
     int quality_ = 2;
+    int target_fps_ = 0;
 
     ConfigValue(){};
     ConfigValue(int delay, int fps, bool mod_opcode, float scale)
@@ -34,11 +35,12 @@ public:
         scale_ = lhs.scale_;
         multiplier_ = lhs.multiplier_;
         quality_ = lhs.quality_;
+        target_fps_ = lhs.target_fps_;
     }
 
     void DebugPrint() const {
-        LOG("\tdelay: %d | fps: %d | mod_opcode: %d | scale: %f | multiplier: %d | quality: %d",
-            delay_, fps_, mod_opcode_, scale_, multiplier_, quality_);
+        LOG("\tdelay: %d | fps: %d | mod_opcode: %d | scale: %f | multiplier: %d | quality: %d | target_fps: %d",
+            delay_, fps_, mod_opcode_, scale_, multiplier_, quality_, target_fps_);
     }
 };
 
