@@ -9,20 +9,30 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -35,12 +45,12 @@ data class AppEntry(
     val icon: Drawable
 )
 
-fun validOutputs(refreshHz: Int, multiplier: Int): List<Int> {
+fun validOutputs(refreshHz: Int, multiplier: Int, minBase: Int = 30): List<Int> {
     val results = mutableListOf<Int>()
     var k = 1
-    while (refreshHz / k >= 30) {
+    while (refreshHz / k >= minBase) {
         val output = refreshHz / k
-        if (refreshHz % k == 0 && output % multiplier == 0 && output / multiplier >= 30) {
+        if (refreshHz % k == 0 && output % multiplier == 0 && output / multiplier >= minBase) {
             results.add(output)
         }
         k++
@@ -58,6 +68,31 @@ data class AppConfig(
     var multiplier: Int = 2,
     var quality: Int = 0
 )
+
+suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
+    withContext(Dispatchers.IO) {
+        val json = JSONObject()
+        val custom = JSONObject()
+        for ((pkg, cfg) in configs) {
+            if (cfg.enabled) {
+                val entry = JSONObject()
+                entry.put("fps", cfg.targetFps / cfg.multiplier)
+                entry.put("multiplier", cfg.multiplier)
+                entry.put("quality", cfg.quality)
+                entry.put("target_fps", cfg.targetFps)
+                custom.put(pkg, entry)
+            }
+        }
+        json.put("custom", custom)
+
+        val cacheFile = File(cacheDir, "TargetList.json")
+        cacheFile.writeText(json.toString(2))
+
+        Shell.cmd(
+            "cp ${cacheFile.absolutePath} /data/local/tmp/TargetList.json && chmod 644 /data/local/tmp/TargetList.json"
+        ).exec()
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,6 +128,28 @@ fun getDisplayRefreshRate(activity: ComponentActivity): Int {
     return 60
 }
 
+@Composable
+fun rememberIsScrollingUp(listState: LazyListState): Boolean {
+    var previousIndex by remember { mutableIntStateOf(listState.firstVisibleItemIndex) }
+    var previousOffset by remember { mutableIntStateOf(listState.firstVisibleItemScrollOffset) }
+
+    return remember {
+        derivedStateOf {
+            val idx = listState.firstVisibleItemIndex
+            val off = listState.firstVisibleItemScrollOffset
+            val scrollingUp = when {
+                idx < previousIndex -> true
+                idx == previousIndex && off <= previousOffset -> true
+                idx == 0 && off == 0 -> true
+                else -> false
+            }
+            previousIndex = idx
+            previousOffset = off
+            scrollingUp
+        }
+    }.value
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigScreen() {
@@ -104,8 +161,13 @@ fun ConfigScreen() {
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var configs by remember { mutableStateOf(mutableMapOf<String, AppConfig>()) }
     var searchQuery by remember { mutableStateOf("") }
-    var saving by remember { mutableStateOf(false) }
     var snackMessage by remember { mutableStateOf<String?>(null) }
+    var advanced by remember { mutableStateOf(false) }
+    var initialLoadDone by remember { mutableStateOf(false) }
+
+    val listState = rememberLazyListState()
+    val searchVisible = rememberIsScrollingUp(listState)
+    val firstItemFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -156,6 +218,22 @@ fun ConfigScreen() {
                 }
                 .distinctBy { it.packageName }
                 .sortedWith(compareByDescending<AppEntry> { configs.containsKey(it.packageName) }.thenBy { it.label.lowercase() })
+
+            initialLoadDone = true
+        }
+    }
+
+    LaunchedEffect(configs, initialLoadDone) {
+        if (!initialLoadDone || hasRoot != true) return@LaunchedEffect
+        delay(500)
+        writeConfig(configs, context.cacheDir)
+        snackMessage = "Saved"
+    }
+
+    LaunchedEffect(snackMessage) {
+        if (snackMessage != null) {
+            delay(1500)
+            snackMessage = null
         }
     }
 
@@ -172,51 +250,21 @@ fun ConfigScreen() {
             TopAppBar(
                 title = { Text("SeFG") },
                 actions = {
-                    TextButton(
-                        onClick = {
-                            saving = true
-                            scope.launch(Dispatchers.IO) {
-                                val json = JSONObject()
-                                val custom = JSONObject()
-                                for ((pkg, cfg) in configs) {
-                                    if (cfg.enabled) {
-                                        val entry = JSONObject()
-                                        entry.put("fps", cfg.targetFps / cfg.multiplier)
-                                        entry.put("multiplier", cfg.multiplier)
-                                        entry.put("quality", cfg.quality)
-                                        entry.put("target_fps", cfg.targetFps)
-                                        custom.put(pkg, entry)
-                                    }
-                                }
-                                json.put("custom", custom)
-
-                                val cacheFile = File(context.cacheDir, "TargetList.json")
-                                cacheFile.writeText(json.toString(2))
-
-                                val result = Shell.cmd(
-                                    "cp ${cacheFile.absolutePath} /data/local/tmp/TargetList.json && chmod 644 /data/local/tmp/TargetList.json"
-                                ).exec()
-
-                                withContext(Dispatchers.Main) {
-                                    saving = false
-                                    snackMessage = if (result.isSuccess) "Saved" else "Write failed"
-                                }
-                            }
+                    FilterChip(
+                        selected = advanced,
+                        onClick = { advanced = !advanced },
+                        label = { Text("Advanced") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
                         },
-                        enabled = hasRoot == true && !saving
-                    ) {
-                        Text("Save")
-                    }
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
                 }
             )
         },
         snackbarHost = {
             snackMessage?.let { msg ->
-                Snackbar(
-                    action = {
-                        TextButton(onClick = { snackMessage = null }) { Text("OK") }
-                    }
-                ) { Text(msg) }
+                Snackbar { Text(msg) }
             }
         }
     ) { padding ->
@@ -234,30 +282,51 @@ fun ConfigScreen() {
                 }
             }
 
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                placeholder = { Text("Search apps") },
-                singleLine = true
-            )
+            AnimatedVisibility(
+                visible = searchVisible,
+                enter = slideInVertically(),
+                exit = slideOutVertically()
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    placeholder = { Text("Search apps") },
+                    singleLine = true
+                )
+            }
 
             if (apps.isEmpty() && hasRoot != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(filtered, key = { it.packageName }) { app ->
-                        val validMults = listOf(1, 2, 3).filter { validOutputs(refreshHz, it).isNotEmpty() }
+                        val minBase = if (advanced) 10 else 30
+                        val validMults = listOf(1, 2, 3).filter { validOutputs(refreshHz, it, minBase).isNotEmpty() }
                         val defaultMult = if (2 in validMults) 2 else (validMults.maxOrNull() ?: 1)
-                        val defaultOutput = validOutputs(refreshHz, defaultMult).let { v ->
+                        val defaultOutput = validOutputs(refreshHz, defaultMult, minBase).let { v ->
                             v.firstOrNull { it <= 60 } ?: v.firstOrNull() ?: 60
                         }
                         val cfg = configs.getOrPut(app.packageName) { AppConfig(targetFps = defaultOutput, multiplier = defaultMult) }
-                        AppRow(app, cfg, refreshHz) { updated ->
-                            configs = configs.toMutableMap().also { it[app.packageName] = updated }
-                        }
+                        val isFirst = filtered.firstOrNull()?.packageName == app.packageName
+                        AppRow(
+                            app = app,
+                            config = cfg,
+                            refreshHz = refreshHz,
+                            advanced = advanced,
+                            focusRequester = if (isFirst) firstItemFocusRequester else null,
+                            onUpdate = { updated ->
+                                configs = configs.toMutableMap().also { it[app.packageName] = updated }
+                            }
+                        )
+                    }
+                }
+
+                LaunchedEffect(filtered) {
+                    if (filtered.isNotEmpty()) {
+                        try { firstItemFocusRequester.requestFocus() } catch (_: Exception) {}
                     }
                 }
             }
@@ -266,11 +335,24 @@ fun ConfigScreen() {
 }
 
 @Composable
-fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfig) -> Unit) {
-    val multiplierOptions = listOf(1, 2, 3).filter { validOutputs(refreshHz, it).isNotEmpty() }
+fun AppRow(
+    app: AppEntry,
+    config: AppConfig,
+    refreshHz: Int,
+    advanced: Boolean,
+    focusRequester: FocusRequester?,
+    onUpdate: (AppConfig) -> Unit
+) {
+    val minBase = if (advanced) 10 else 30
+    val multiplierOptions = if (advanced) listOf(1, 2, 3) else listOf(1, 2, 3).filter { validOutputs(refreshHz, it, minBase).isNotEmpty() }
     val qualityLabels = listOf("Performance", "Balanced", "High")
 
-    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+    val rowModifier = Modifier
+        .padding(horizontal = 16.dp, vertical = 4.dp)
+        .focusGroup()
+        .let { mod -> if (focusRequester != null) mod.focusRequester(focusRequester) else mod }
+
+    Column(modifier = rowModifier) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Image(
                 bitmap = app.icon.toBitmap(144, 144).asImageBitmap(),
@@ -296,7 +378,7 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
                         SegmentedButton(
                             selected = config.multiplier == mult,
                             onClick = {
-                                val newValid = validOutputs(refreshHz, mult)
+                                val newValid = validOutputs(refreshHz, mult, minBase)
                                 val snapped = snapToNearest(config.targetFps, newValid)
                                 onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                             },
@@ -309,7 +391,7 @@ fun AppRow(app: AppEntry, config: AppConfig, refreshHz: Int, onUpdate: (AppConfi
 
                 Spacer(Modifier.height(8.dp))
 
-                val outputs = validOutputs(refreshHz, config.multiplier).sorted()
+                val outputs = validOutputs(refreshHz, config.multiplier, minBase).sorted()
 
                 Text("Output FPS", style = MaterialTheme.typography.labelMedium)
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
