@@ -36,6 +36,7 @@ file(GLOB DISPATCHER_SRC src/file_watch/dispatcher/*.cc)
 file(GLOB JNIHELPER_SRC src/jni_helper/*.cc)
 file(GLOB UNITY_SRC src/unity/*.cc)
 file(GLOB CAPTURE_SRC src/capture/*.cc)
+file(GLOB PRESENT_SRC src/present/*.cc)
 file(GLOB XDL_SRC third/xdl/*.c)
 file(GLOB RIRU_HIDE_SRC third/riru_hide/*.c third/riru_hide/*.cc)
 
@@ -54,6 +55,7 @@ add_library(seifg-android SHARED
     ${JNIHELPER_SRC}
     ${UNITY_SRC}
     ${CAPTURE_SRC}
+    ${PRESENT_SRC}
     ${XDL_SRC}
     ${RIRU_HIDE_SRC}
 )

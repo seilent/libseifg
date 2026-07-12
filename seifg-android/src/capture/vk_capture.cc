@@ -1,13 +1,16 @@
 #include "capture/vk_capture.hh"
 
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_android.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
+#include <android/native_window.h>
 #include <unordered_map>
 #include <mutex>
+#include <condition_variable>
 #include <vector>
 #include <atomic>
 #include <cstdio>
@@ -19,6 +22,7 @@
 #include <dlfcn.h>
 #include "shadowhook.h"
 #include "utility/logger.hh"
+#include "present/sc_present.hh"
 #include "seifg.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -71,6 +75,7 @@ static int32_t g_ctx = -1;
 static AHardwareBuffer* g_ahbIn0 = nullptr;
 static AHardwareBuffer* g_ahbIn1 = nullptr;
 static AHardwareBuffer* g_ahbOut = nullptr;
+static AHardwareBuffer* g_ahbReal = nullptr;
 static GLuint g_texIn0 = 0, g_fboIn0 = 0, g_texIn1 = 0, g_fboIn1 = 0;
 static GLuint g_texOut = 0, g_fboOut = 0;
 static int g_genW = 0, g_genH = 0;
@@ -93,24 +98,39 @@ static int g_vkW = 0;
 static int g_vkH = 0;
 static VkFormat g_vkFmt = VK_FORMAT_UNDEFINED;
 
+static bool g_ahbImportAvailable = false;
+static constexpr int kMaxOutputs = 2;
+static VkImage g_ahbIn0Img = VK_NULL_HANDLE;
+static VkImage g_ahbIn1Img = VK_NULL_HANDLE;
+static VkImage g_ahbRealImg = VK_NULL_HANDLE;
+static VkImage g_ahbOutImg[kMaxOutputs] = {};
+static VkDeviceMemory g_ahbIn0Mem = VK_NULL_HANDLE;
+static VkDeviceMemory g_ahbIn1Mem = VK_NULL_HANDLE;
+static VkDeviceMemory g_ahbRealMem = VK_NULL_HANDLE;
+static VkDeviceMemory g_ahbOutMem[kMaxOutputs] = {};
+static bool g_ahbImagesImported = false;
+
+static VkCommandPool g_gpuCopyPool = VK_NULL_HANDLE;
+static VkCommandBuffer g_gpuCopyCmd = VK_NULL_HANDLE;
+static VkFence g_gpuCopyFence = VK_NULL_HANDLE;
+
+static VkCommandPool g_gpuSnapPool = VK_NULL_HANDLE;
+static VkCommandBuffer g_gpuSnapCmd = VK_NULL_HANDLE;
+static VkFence g_gpuSnapFence = VK_NULL_HANDLE;
+
+static PFN_vkGetAndroidHardwareBufferPropertiesANDROID g_vkGetAhbProps = nullptr;
+
 static std::atomic<uint64_t> g_captureCount{0};
 
 static int g_cfgFps = 0;
 static int g_cfgMultiplier = 2;
 static int g_cfgQuality = 2;
 
-static constexpr int kMaxOutputs = 2;
 static AHardwareBuffer* g_ahbOutN[kMaxOutputs] = {};
 static GLuint g_texOutN[kMaxOutputs] = {};
 static GLuint g_fboOutN[kMaxOutputs] = {};
 
-static VkBuffer g_vkOutStaging = VK_NULL_HANDLE;
-static VkDeviceMemory g_vkOutStagingMem = VK_NULL_HANDLE;
-static VkSemaphore g_reinjectSem = VK_NULL_HANDLE;
-static VkCommandPool g_reinjectPool = VK_NULL_HANDLE;
-static VkCommandBuffer g_reinjectCmd = VK_NULL_HANDLE;
-static VkFence g_reinjectFence = VK_NULL_HANDLE;
-static bool g_reinjectResAlloc = false;
+static int32_t g_scBufTransform = 0;
 
 struct SwapchainInfo {
     VkDevice device;
@@ -134,9 +154,44 @@ struct SwapchainInfo {
 static std::unordered_map<VkSwapchainKHR, SwapchainInfo> g_swapchains;
 static std::mutex g_mu;
 
+static std::unordered_map<VkSurfaceKHR, ANativeWindow*> g_surfaceWindowMap;
+static std::unordered_map<VkSwapchainKHR, ANativeWindow*> g_swapchainWindowMap;
+static ScPresenter g_scPresenter;
+static std::mutex g_scMu;
+
+static std::thread g_fgThread;
+static std::mutex g_fgMutex;
+static std::condition_variable g_fgCv;
+static std::atomic<bool> g_fgRunning{false};
+static bool g_fgPendingValid = false;
+static std::mutex g_fgBufMutex;
+
+struct FgRequest {
+    uint64_t captureCount = 0;
+    uint64_t seq = 0;
+};
+static FgRequest g_fgPending;
+
+static std::atomic<uint64_t> g_fgSeq{0};
+
+struct FgInstrStats {
+    std::atomic<uint64_t> captured{0};
+    std::atomic<uint64_t> dropped{0};
+    std::atomic<uint64_t> generated{0};
+    std::atomic<uint64_t> lastPrevSeq{0};
+    std::atomic<uint64_t> lastCurSeq{0};
+    std::atomic<uint64_t> gapSum{0};
+    std::atomic<uint64_t> gapCount{0};
+};
+static FgInstrStats g_instr;
+
+static void framegen_thread_loop();
+
 static PFN_vkGetSwapchainImagesKHR g_real_get_swapchain_images = nullptr;
 static PFN_vkAcquireNextImageKHR g_real_acquire = nullptr;
 static PFN_vkAcquireNextImage2KHR g_real_acquire2 = nullptr;
+static PFN_vkCreateAndroidSurfaceKHR g_real_create_android_surface = nullptr;
+static PFN_vkDestroySurfaceKHR g_real_destroy_surface = nullptr;
 
 static VkResult VKAPI_CALL hooked_CreateDevice(
     VkPhysicalDevice phys,
@@ -167,6 +222,15 @@ static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
     VkDevice device,
     const VkAcquireNextImageInfoKHR* pAcquireInfo,
     uint32_t* pImageIndex);
+static VkResult VKAPI_CALL hooked_CreateAndroidSurfaceKHR(
+    VkInstance instance,
+    const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSurfaceKHR* pSurface);
+static void VKAPI_CALL hooked_DestroySurfaceKHR(
+    VkInstance instance,
+    VkSurfaceKHR surface,
+    const VkAllocationCallbacks* pAllocator);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstance instance, const char* pName);
 
@@ -425,6 +489,198 @@ static PFN_vkVoidFunction resolve_real(VkDevice device, const char* name) {
     return p;
 }
 
+static PFN_vkVoidFunction resolve_instance(VkInstance instance, const char* name) {
+    if (g_real_gipa) return g_real_gipa(instance, name);
+    return nullptr;
+}
+
+static bool import_ahb_as_image(AHardwareBuffer* ahb, VkImage* outImg, VkDeviceMemory* outMem) {
+    if (!g_vkGetAhbProps || !ahb) return false;
+
+    VkAndroidHardwareBufferFormatPropertiesANDROID fmtProps{};
+    fmtProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+    VkAndroidHardwareBufferPropertiesANDROID ahbProps{};
+    ahbProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+    ahbProps.pNext = &fmtProps;
+    if (g_vkGetAhbProps(g_vkDevice, ahb, &ahbProps) != VK_SUCCESS) return false;
+
+    AHardwareBuffer_Desc desc{};
+    AHardwareBuffer_describe(ahb, &desc);
+
+    VkExternalMemoryImageCreateInfo ext{};
+    ext.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.pNext = &ext;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = {desc.width, desc.height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    auto realCreateImage = reinterpret_cast<PFN_vkCreateImage>(resolve_real(g_vkDevice, "vkCreateImage"));
+    if (!realCreateImage) return false;
+    if (realCreateImage(g_vkDevice, &ici, nullptr, outImg) != VK_SUCCESS) return false;
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    auto realGetMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        resolve_instance(g_vkInstance, "vkGetPhysicalDeviceMemoryProperties"));
+    if (realGetMemProps) realGetMemProps(g_vkPhys, &memProps);
+    else vkGetPhysicalDeviceMemoryProperties(g_vkPhys, &memProps);
+
+    uint32_t memType = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+        if (ahbProps.memoryTypeBits & (1u << i)) { memType = i; break; }
+    if (memType == UINT32_MAX) {
+        auto realDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(resolve_real(g_vkDevice, "vkDestroyImage"));
+        if (realDestroyImage) realDestroyImage(g_vkDevice, *outImg, nullptr);
+        *outImg = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkMemoryDedicatedAllocateInfo ded{};
+    ded.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    ded.image = *outImg;
+    VkImportAndroidHardwareBufferInfoANDROID imp{};
+    imp.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+    imp.pNext = &ded;
+    imp.buffer = ahb;
+    VkMemoryAllocateInfo mai{};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.pNext = &imp;
+    mai.allocationSize = ahbProps.allocationSize;
+    mai.memoryTypeIndex = memType;
+
+    auto realAllocMem = reinterpret_cast<PFN_vkAllocateMemory>(resolve_real(g_vkDevice, "vkAllocateMemory"));
+    if (!realAllocMem || realAllocMem(g_vkDevice, &mai, nullptr, outMem) != VK_SUCCESS) {
+        auto realDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(resolve_real(g_vkDevice, "vkDestroyImage"));
+        if (realDestroyImage) realDestroyImage(g_vkDevice, *outImg, nullptr);
+        *outImg = VK_NULL_HANDLE;
+        return false;
+    }
+
+    auto realBindImageMem = reinterpret_cast<PFN_vkBindImageMemory>(resolve_real(g_vkDevice, "vkBindImageMemory"));
+    if (!realBindImageMem || realBindImageMem(g_vkDevice, *outImg, *outMem, 0) != VK_SUCCESS) {
+        auto realDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(resolve_real(g_vkDevice, "vkDestroyImage"));
+        auto realFreeMem = reinterpret_cast<PFN_vkFreeMemory>(resolve_real(g_vkDevice, "vkFreeMemory"));
+        if (realDestroyImage) realDestroyImage(g_vkDevice, *outImg, nullptr);
+        if (realFreeMem) realFreeMem(g_vkDevice, *outMem, nullptr);
+        *outImg = VK_NULL_HANDLE; *outMem = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+static bool init_gpu_copy_resources() {
+    auto realCreatePool = reinterpret_cast<PFN_vkCreateCommandPool>(resolve_real(g_vkDevice, "vkCreateCommandPool"));
+    auto realAllocCmd = reinterpret_cast<PFN_vkAllocateCommandBuffers>(resolve_real(g_vkDevice, "vkAllocateCommandBuffers"));
+    auto realCreateFence = reinterpret_cast<PFN_vkCreateFence>(resolve_real(g_vkDevice, "vkCreateFence"));
+    if (!realCreatePool || !realAllocCmd || !realCreateFence) return false;
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.queueFamilyIndex = g_vkFamily;
+    if (realCreatePool(g_vkDevice, &pci, nullptr, &g_gpuCopyPool) != VK_SUCCESS) return false;
+    if (realCreatePool(g_vkDevice, &pci, nullptr, &g_gpuSnapPool) != VK_SUCCESS) return false;
+
+    VkCommandBufferAllocateInfo cba{};
+    cba.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cba.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cba.commandBufferCount = 1;
+    cba.commandPool = g_gpuCopyPool;
+    if (realAllocCmd(g_vkDevice, &cba, &g_gpuCopyCmd) != VK_SUCCESS) return false;
+    cba.commandPool = g_gpuSnapPool;
+    if (realAllocCmd(g_vkDevice, &cba, &g_gpuSnapCmd) != VK_SUCCESS) return false;
+
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (realCreateFence(g_vkDevice, &fci, nullptr, &g_gpuCopyFence) != VK_SUCCESS) return false;
+    if (realCreateFence(g_vkDevice, &fci, nullptr, &g_gpuSnapFence) != VK_SUCCESS) return false;
+
+    return true;
+}
+
+static bool ensure_ahb_images_imported() {
+    if (g_ahbImagesImported) return true;
+    if (!g_ahbImportAvailable || !g_ahbIn0 || !g_ahbIn1 || !g_ahbReal) return false;
+
+    if (!g_gpuCopyPool && !init_gpu_copy_resources()) {
+        g_ahbImportAvailable = false;
+        return false;
+    }
+
+    if (!import_ahb_as_image(g_ahbIn0, &g_ahbIn0Img, &g_ahbIn0Mem)) { g_ahbImportAvailable = false; return false; }
+    if (!import_ahb_as_image(g_ahbIn1, &g_ahbIn1Img, &g_ahbIn1Mem)) { g_ahbImportAvailable = false; return false; }
+    if (!import_ahb_as_image(g_ahbReal, &g_ahbRealImg, &g_ahbRealMem)) { g_ahbImportAvailable = false; return false; }
+
+    int numOut = g_cfgMultiplier - 1;
+    for (int i = 0; i < numOut; ++i) {
+        if (g_ahbOutN[i] && !import_ahb_as_image(g_ahbOutN[i], &g_ahbOutImg[i], &g_ahbOutMem[i])) {
+            g_ahbImportAvailable = false;
+            return false;
+        }
+    }
+
+    g_ahbImagesImported = true;
+    LOG("[GpuBlit] AHB images imported successfully");
+    return true;
+}
+
+static VkResult VKAPI_CALL hooked_CreateAndroidSurfaceKHR(
+    VkInstance instance,
+    const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSurfaceKHR* pSurface) {
+
+    if (!g_real_create_android_surface) {
+        g_real_create_android_surface = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(
+            resolve_instance(instance, "vkCreateAndroidSurfaceKHR"));
+    }
+    if (!g_real_create_android_surface) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult r = g_real_create_android_surface(instance, pCreateInfo, pAllocator, pSurface);
+    if (r == VK_SUCCESS && pSurface && pCreateInfo->window) {
+        ANativeWindow_acquire(pCreateInfo->window);
+        std::lock_guard<std::mutex> lk(g_scMu);
+        g_surfaceWindowMap[*pSurface] = pCreateInfo->window;
+        LOG("[VkSC] captured window %p for surface %p",
+            reinterpret_cast<void*>(pCreateInfo->window), reinterpret_cast<void*>(*pSurface));
+    }
+    return r;
+}
+
+static void VKAPI_CALL hooked_DestroySurfaceKHR(
+    VkInstance instance,
+    VkSurfaceKHR surface,
+    const VkAllocationCallbacks* pAllocator) {
+
+    {
+        std::lock_guard<std::mutex> lk(g_scMu);
+        auto it = g_surfaceWindowMap.find(surface);
+        if (it != g_surfaceWindowMap.end()) {
+            g_scPresenter.destroy();
+            ANativeWindow_release(it->second);
+            g_surfaceWindowMap.erase(it);
+            LOG("[VkSC] released window for surface %p", reinterpret_cast<void*>(surface));
+        }
+    }
+
+    if (!g_real_destroy_surface) {
+        g_real_destroy_surface = reinterpret_cast<PFN_vkDestroySurfaceKHR>(
+            resolve_instance(instance, "vkDestroySurfaceKHR"));
+    }
+    if (g_real_destroy_surface)
+        g_real_destroy_surface(instance, surface, pAllocator);
+}
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
     if (strcmp(pName, "vkQueuePresentKHR") == 0) {
@@ -503,6 +759,16 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstanc
             g_real_acquire2 = reinterpret_cast<PFN_vkAcquireNextImage2KHR>(g_real_gipa(instance, pName));
         return reinterpret_cast<PFN_vkVoidFunction>(hooked_AcquireNextImage2KHR);
     }
+    if (strcmp(pName, "vkCreateAndroidSurfaceKHR") == 0) {
+        if (!g_real_create_android_surface && g_real_gipa)
+            g_real_create_android_surface = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_CreateAndroidSurfaceKHR);
+    }
+    if (strcmp(pName, "vkDestroySurfaceKHR") == 0) {
+        if (!g_real_destroy_surface && g_real_gipa)
+            g_real_destroy_surface = reinterpret_cast<PFN_vkDestroySurfaceKHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_DestroySurfaceKHR);
+    }
     return g_real_gipa ? g_real_gipa(instance, pName) : nullptr;
 }
 
@@ -517,14 +783,94 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    VkResult result = g_real_create_device(phys, ci, a, pDev);
+    static const char* kRequiredExts[] = {
+        "VK_ANDROID_external_memory_android_hardware_buffer",
+        "VK_KHR_sampler_ycbcr_conversion",
+        "VK_EXT_queue_family_foreign",
+        "VK_KHR_external_memory",
+        "VK_KHR_bind_memory2",
+        "VK_KHR_get_memory_requirements2",
+        "VK_KHR_dedicated_allocation",
+        "VK_KHR_maintenance1",
+    };
+    static constexpr uint32_t kNumRequired = sizeof(kRequiredExts) / sizeof(kRequiredExts[0]);
+
+    auto realEnumExt = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+        resolve_instance(g_vkInstance, "vkEnumerateDeviceExtensionProperties"));
+    if (!realEnumExt && g_real_gipa)
+        realEnumExt = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+            g_real_gipa(g_vkInstance, "vkEnumerateDeviceExtensionProperties"));
+
+    bool allSupported = false;
+    std::vector<const char*> extraExts;
+
+    if (realEnumExt) {
+        uint32_t extCount = 0;
+        realEnumExt(phys, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> available(extCount);
+        realEnumExt(phys, nullptr, &extCount, available.data());
+
+        allSupported = true;
+        for (uint32_t r = 0; r < kNumRequired; ++r) {
+            bool found = false;
+            for (uint32_t e = 0; e < extCount; ++e) {
+                if (strcmp(available[e].extensionName, kRequiredExts[r]) == 0) { found = true; break; }
+            }
+            if (!found) { allSupported = false; break; }
+        }
+
+        if (allSupported) {
+            for (uint32_t r = 0; r < kNumRequired; ++r) {
+                bool alreadyEnabled = false;
+                for (uint32_t e = 0; e < ci->enabledExtensionCount; ++e) {
+                    if (strcmp(ci->ppEnabledExtensionNames[e], kRequiredExts[r]) == 0) { alreadyEnabled = true; break; }
+                }
+                if (!alreadyEnabled) extraExts.push_back(kRequiredExts[r]);
+            }
+        }
+    }
+
+    VkDeviceCreateInfo modCi = *ci;
+    std::vector<const char*> allExts;
+    VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcrFeature{};
+
+    if (allSupported && !extraExts.empty()) {
+        allExts.reserve(ci->enabledExtensionCount + extraExts.size());
+        for (uint32_t i = 0; i < ci->enabledExtensionCount; ++i)
+            allExts.push_back(ci->ppEnabledExtensionNames[i]);
+        for (auto e : extraExts) allExts.push_back(e);
+        modCi.enabledExtensionCount = static_cast<uint32_t>(allExts.size());
+        modCi.ppEnabledExtensionNames = allExts.data();
+
+        ycbcrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
+        ycbcrFeature.samplerYcbcrConversion = VK_TRUE;
+        ycbcrFeature.pNext = const_cast<void*>(modCi.pNext);
+        modCi.pNext = &ycbcrFeature;
+    }
+
+    VkResult result = g_real_create_device(phys, allSupported ? &modCi : ci, a, pDev);
     if (result == VK_SUCCESS && pDev) {
         g_vkPhys = phys;
         g_vkDevice = *pDev;
         if (ci->queueCreateInfoCount > 0) {
             g_vkFamily = ci->pQueueCreateInfos[0].queueFamilyIndex;
         }
-        vkGetDeviceQueue(g_vkDevice, g_vkFamily, 0, &g_vkQueue);
+
+        auto realGetQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(resolve_real(*pDev, "vkGetDeviceQueue"));
+        if (realGetQueue) realGetQueue(*pDev, g_vkFamily, 0, &g_vkQueue);
+        else vkGetDeviceQueue(*pDev, g_vkFamily, 0, &g_vkQueue);
+
+        if (allSupported) {
+            g_vkGetAhbProps = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+                resolve_real(*pDev, "vkGetAndroidHardwareBufferPropertiesANDROID"));
+            g_ahbImportAvailable = (g_vkGetAhbProps != nullptr);
+            LOG("[VkGen] AHB import %s (injected %zu exts)",
+                g_ahbImportAvailable ? "available" : "unavailable (null getAhbProps)",
+                extraExts.size());
+        } else {
+            g_ahbImportAvailable = false;
+            LOG("[VkGen] AHB import unavailable (missing required ext)");
+        }
 
         LOG("[VkGen] device recorded dev=%p phys=%p family=%u",
             reinterpret_cast<void*>(g_vkDevice),
@@ -601,6 +947,20 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
 
     LOG("[VkReinject] virtualization enabled, creating real swapchain with FIFO");
 
+    {
+        VkSurfaceTransformFlagBitsKHR pt = ci->preTransform;
+        int32_t bt = 0;
+        if (pt == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR)
+            bt = 7;
+        else if (pt == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR)
+            bt = 3;
+        else if (pt == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)
+            bt = 4;
+        g_scBufTransform = bt;
+        g_scPresenter.setBufferTransform(bt);
+        LOG("[VkReinject] preTransform=0x%x -> bufTransform=%d", static_cast<int>(pt), bt);
+    }
+
     VkSwapchainCreateInfoKHR modCi = *ci;
     modCi.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     modCi.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -609,6 +969,13 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     if (result != VK_SUCCESS || !pSc) return result;
 
     VkSwapchainKHR realSc = *pSc;
+
+    {
+        std::lock_guard<std::mutex> lk(g_scMu);
+        auto it = g_surfaceWindowMap.find(ci->surface);
+        if (it != g_surfaceWindowMap.end())
+            g_swapchainWindowMap[realSc] = it->second;
+    }
 
     if (!g_real_get_swapchain_images)
         g_real_get_swapchain_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(resolve_real(device, "vkGetSwapchainImagesKHR"));
@@ -727,78 +1094,133 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
 
 static void vk_capture_setup();
 
-static void alloc_reinject_resources(VkDevice device) {
-    if (g_reinjectResAlloc) return;
-
-    VkDeviceSize sz = static_cast<VkDeviceSize>(g_vkW) * g_vkH * 4;
-    VkBufferCreateInfo bufCi{};
-    bufCi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufCi.size = sz;
-    bufCi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    bufCi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VkResult r = vkCreateBuffer(device, &bufCi, nullptr, &g_vkOutStaging);
-    if (r != VK_SUCCESS) { ERROR("[VkReinject] createBuffer out failed %d", r); return; }
-
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, g_vkOutStaging, &memReqs);
-
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(g_vkPhys, &memProps);
-    uint32_t memIdx = UINT32_MAX;
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-        if ((memReqs.memoryTypeBits & (1u << i)) &&
-            (memProps.memoryTypes[i].propertyFlags &
-             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
-            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-            memIdx = i;
-            break;
-        }
-    }
-    if (memIdx == UINT32_MAX) { ERROR("[VkReinject] no host-visible memory for out staging"); return; }
-
-    VkMemoryAllocateInfo memAi{};
-    memAi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    memAi.allocationSize = memReqs.size;
-    memAi.memoryTypeIndex = memIdx;
-    r = vkAllocateMemory(device, &memAi, nullptr, &g_vkOutStagingMem);
-    if (r != VK_SUCCESS) { ERROR("[VkReinject] allocMemory out failed %d", r); return; }
-    vkBindBufferMemory(device, g_vkOutStaging, g_vkOutStagingMem, 0);
-
-    VkSemaphoreCreateInfo semCi{};
-    semCi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vkCreateSemaphore(device, &semCi, nullptr, &g_reinjectSem);
-
-    VkCommandPoolCreateInfo poolCi{};
-    poolCi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolCi.queueFamilyIndex = g_vkFamily;
-    poolCi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCreateCommandPool(device, &poolCi, nullptr, &g_reinjectPool);
-
-    VkCommandBufferAllocateInfo cmdAi{};
-    cmdAi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmdAi.commandPool = g_reinjectPool;
-    cmdAi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmdAi.commandBufferCount = 1;
-    vkAllocateCommandBuffers(device, &cmdAi, &g_reinjectCmd);
-
-    VkFenceCreateInfo fenceCi{};
-    fenceCi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    vkCreateFence(device, &fenceCi, nullptr, &g_reinjectFence);
-
-    g_reinjectResAlloc = true;
-    LOG("[VkReinject] reinject resources allocated %dx%d", g_vkW, g_vkH);
-}
-
-static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo) {
+static bool vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo) {
     if (!g_vk_gen_ready.load()) {
         g_vkW = static_cast<int>(scInfo.extent.width);
         g_vkH = static_cast<int>(scInfo.extent.height);
         g_vkFmt = scInfo.format;
         vk_capture_setup();
-        if (!g_vk_gen_ready.load()) return;
+        if (!g_vk_gen_ready.load()) return false;
     }
 
-    {
+    if (!g_fgBufMutex.try_lock()) return false;
+    std::lock_guard<std::mutex> blk(g_fgBufMutex, std::adopt_lock);
+
+    bool useGpu = g_ahbImportAvailable && ensure_ahb_images_imported();
+
+    if (useGpu) {
+        auto realResetCmd = reinterpret_cast<PFN_vkResetCommandBuffer>(resolve_real(g_vkDevice, "vkResetCommandBuffer"));
+        auto realBeginCmd = reinterpret_cast<PFN_vkBeginCommandBuffer>(resolve_real(g_vkDevice, "vkBeginCommandBuffer"));
+        auto realEndCmd = reinterpret_cast<PFN_vkEndCommandBuffer>(resolve_real(g_vkDevice, "vkEndCommandBuffer"));
+        auto realCmdBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(resolve_real(g_vkDevice, "vkCmdPipelineBarrier"));
+        auto realCmdCopy = reinterpret_cast<PFN_vkCmdCopyImage>(resolve_real(g_vkDevice, "vkCmdCopyImage"));
+        auto realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(resolve_real(g_vkDevice, "vkQueueSubmit"));
+        auto realWaitFences = reinterpret_cast<PFN_vkWaitForFences>(resolve_real(g_vkDevice, "vkWaitForFences"));
+        auto realResetFences = reinterpret_cast<PFN_vkResetFences>(resolve_real(g_vkDevice, "vkResetFences"));
+
+        if (!realResetCmd || !realBeginCmd || !realEndCmd || !realCmdBarrier || !realCmdCopy ||
+            !realSubmit || !realWaitFences || !realResetFences) {
+            useGpu = false;
+            g_ahbImportAvailable = false;
+        } else {
+            realResetCmd(g_gpuCopyCmd, 0);
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            realBeginCmd(g_gpuCopyCmd, &beginInfo);
+
+            VkImageMemoryBarrier bars[4]{};
+            uint32_t barCount = 0;
+
+            bars[barCount].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bars[barCount].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            bars[barCount].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            bars[barCount].srcAccessMask = 0;
+            bars[barCount].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            bars[barCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bars[barCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bars[barCount].image = g_ahbIn1Img;
+            bars[barCount].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            barCount++;
+
+            bars[barCount].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bars[barCount].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            bars[barCount].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bars[barCount].srcAccessMask = 0;
+            bars[barCount].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bars[barCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bars[barCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bars[barCount].image = g_ahbIn0Img;
+            bars[barCount].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            barCount++;
+
+            realCmdBarrier(g_gpuCopyCmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, barCount, bars);
+
+            VkImageCopy region{};
+            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.extent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
+            realCmdCopy(g_gpuCopyCmd, g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        g_ahbIn0Img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            VkImageMemoryBarrier midBars[3]{};
+            uint32_t midCount = 0;
+
+            midBars[midCount].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            midBars[midCount].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            midBars[midCount].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            midBars[midCount].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            midBars[midCount].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            midBars[midCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            midBars[midCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            midBars[midCount].image = g_ahbIn1Img;
+            midBars[midCount].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            midCount++;
+
+            midBars[midCount].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            midBars[midCount].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            midBars[midCount].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            midBars[midCount].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            midBars[midCount].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            midBars[midCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            midBars[midCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            midBars[midCount].image = virtImg;
+            midBars[midCount].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            midCount++;
+
+            realCmdBarrier(g_gpuCopyCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, midCount, midBars);
+
+            realCmdCopy(g_gpuCopyCmd, virtImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            VkImageMemoryBarrier postBar{};
+            postBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            postBar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            postBar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            postBar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            postBar.dstAccessMask = 0;
+            postBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            postBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            postBar.image = virtImg;
+            postBar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            realCmdBarrier(g_gpuCopyCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &postBar);
+
+            realEndCmd(g_gpuCopyCmd);
+
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &g_gpuCopyCmd;
+            realSubmit(g_vkQueue, 1, &submit, g_gpuCopyFence);
+            realWaitFences(g_vkDevice, 1, &g_gpuCopyFence, VK_TRUE, UINT64_MAX);
+            realResetFences(g_vkDevice, 1, &g_gpuCopyFence);
+        }
+    }
+
+    if (!useGpu) {
         AHardwareBuffer_Desc d0{}, d1{};
         AHardwareBuffer_describe(g_ahbIn0, &d0);
         AHardwareBuffer_describe(g_ahbIn1, &d1);
@@ -884,107 +1306,7 @@ static void vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
 
     g_captureCount.fetch_add(1);
 
-    if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
-        dump_ahb(g_ahbIn0, "seifg_in0.png", false);
-        dump_ahb(g_ahbIn1, "seifg_in1.png", false);
-        dump_ahb(g_ahbOut, "seifg_out.png", false);
-        LOG("[VkReinject] triggered dump at capture %llu",
-            static_cast<unsigned long long>(g_captureCount.load()));
-        unlink(g_triggerPath);
-    }
-}
-
-static VkResult vk_reinject_present_interpolated(VkQueue q, const SwapchainInfo& scInfo, AHardwareBuffer* ahbSrc) {
-    if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
-    if (!g_reinjectResAlloc) return VK_ERROR_INITIALIZATION_FAILED;
-
-    void* ahbBase = nullptr;
-    AHardwareBuffer_Desc dd{};
-    AHardwareBuffer_describe(ahbSrc, &dd);
-    int lr = AHardwareBuffer_lock(ahbSrc, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &ahbBase);
-    if (lr != 0 || !ahbBase) return VK_ERROR_UNKNOWN;
-
-    void* mapped = nullptr;
-    vkMapMemory(scInfo.device, g_vkOutStagingMem, 0,
-                static_cast<VkDeviceSize>(g_vkW) * g_vkH * 4, 0, &mapped);
-    if (mapped) {
-        for (int y = 0; y < g_vkH; ++y) {
-            memcpy(static_cast<uint8_t*>(mapped) + static_cast<size_t>(y) * g_vkW * 4,
-                   static_cast<uint8_t*>(ahbBase) + static_cast<size_t>(y) * dd.stride * 4,
-                   static_cast<size_t>(g_vkW) * 4);
-        }
-        vkUnmapMemory(scInfo.device, g_vkOutStagingMem);
-    }
-    AHardwareBuffer_unlock(g_ahbOut, nullptr);
-
-    if (!mapped) return VK_ERROR_UNKNOWN;
-
-    uint32_t realIdx = 0;
-    VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
-                                     scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
-    if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) return acqRes;
-
-    vkResetCommandBuffer(g_reinjectCmd, 0);
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_reinjectCmd, &beginInfo);
-
-    VkImageMemoryBarrier bar{};
-    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bar.srcAccessMask = 0;
-    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.image = scInfo.realImages[realIdx];
-    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(g_reinjectCmd,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &bar);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
-    vkCmdCopyBufferToImage(g_reinjectCmd, g_vkOutStaging, scInfo.realImages[realIdx],
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    bar.dstAccessMask = 0;
-    vkCmdPipelineBarrier(g_reinjectCmd,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &bar);
-
-    vkEndCommandBuffer(g_reinjectCmd);
-
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.waitSemaphoreCount = 1;
-    submit.pWaitSemaphores = &scInfo.realAcquireSem;
-    submit.pWaitDstStageMask = &waitStage;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &g_reinjectCmd;
-    submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores = &g_reinjectSem;
-    vkQueueSubmit(g_vkQueue, 1, &submit, g_reinjectFence);
-
-    vkWaitForFences(scInfo.device, 1, &g_reinjectFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(scInfo.device, 1, &g_reinjectFence);
-
-    VkPresentInfoKHR realPi{};
-    realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    realPi.waitSemaphoreCount = 1;
-    realPi.pWaitSemaphores = &g_reinjectSem;
-    realPi.swapchainCount = 1;
-    realPi.pSwapchains = &scInfo.realSwapchain;
-    realPi.pImageIndices = &realIdx;
-    return g_real_present(q, &realPi);
+    return true;
 }
 
 static void vk_capture_setup() {
@@ -1065,11 +1387,12 @@ static void vk_capture_setup() {
     if (!g_ahbIn0) {
         g_ahbIn0 = alloc_ahb(g_vkW, g_vkH);
         g_ahbIn1 = alloc_ahb(g_vkW, g_vkH);
+        g_ahbReal = alloc_ahb(g_vkW, g_vkH);
         int numOut = g_cfgMultiplier - 1;
         for (int i = 0; i < numOut; ++i)
             g_ahbOutN[i] = alloc_ahb(g_vkW, g_vkH);
         g_ahbOut = g_ahbOutN[0];
-        if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut) { LOG("[VkGen] ahb alloc failed"); return; }
+        if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbOut || !g_ahbReal) { LOG("[VkGen] ahb alloc failed"); return; }
     }
 
     int numOut = g_cfgMultiplier - 1;
@@ -1090,6 +1413,212 @@ static void vk_capture_setup() {
 
     LOG("[VkGen] setup ctx=%d %dx%d fmt=%d", g_ctx, g_vkW, g_vkH, static_cast<int>(format));
     if (g_ctx >= 0) g_vk_gen_ready = true;
+}
+
+static void framegen_instr_tick() {
+    static struct timespec s_last = {0, 0};
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (s_last.tv_sec == 0 && s_last.tv_nsec == 0) { s_last = now; return; }
+    int64_t elapsedNs = (now.tv_sec - s_last.tv_sec) * 1000000000LL + (now.tv_nsec - s_last.tv_nsec);
+    if (elapsedNs < 1000000000LL) return;
+    s_last = now;
+
+    uint64_t cap = g_instr.captured.exchange(0);
+    uint64_t drop = g_instr.dropped.exchange(0);
+    uint64_t gen = g_instr.generated.exchange(0);
+    uint64_t prevSeq = g_instr.lastPrevSeq.load();
+    uint64_t curSeq = g_instr.lastCurSeq.load();
+    uint64_t gapS = g_instr.gapSum.exchange(0);
+    uint64_t gapC = g_instr.gapCount.exchange(0);
+    float gapAvg = gapC > 0 ? static_cast<float>(gapS) / static_cast<float>(gapC) : 0.0f;
+
+    LOG("[VkReinject] framegen: captured=%llu/s dropped=%llu/s generated=%llu/s presentPerGen=%d lastPair=(%llu,%llu) gapAvg=%.2f",
+        static_cast<unsigned long long>(cap),
+        static_cast<unsigned long long>(drop),
+        static_cast<unsigned long long>(gen),
+        g_cfgMultiplier,
+        static_cast<unsigned long long>(prevSeq),
+        static_cast<unsigned long long>(curSeq),
+        gapAvg);
+}
+
+static int64_t nowNsCapture() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void framegen_thread_loop() {
+    LOG("[FgThread] started");
+    uint64_t prevProcessedSeq = 0;
+    while (true) {
+        FgRequest req;
+        {
+            std::unique_lock<std::mutex> lk(g_fgMutex);
+            g_fgCv.wait(lk, [] {
+                return g_fgPendingValid || !g_fgRunning.load(std::memory_order_relaxed);
+            });
+            if (!g_fgRunning.load(std::memory_order_relaxed) && !g_fgPendingValid)
+                break;
+            req = g_fgPending;
+            g_fgPendingValid = false;
+        }
+
+        if (!g_vk_gen_ready.load() || g_ctx < 0) continue;
+
+        g_instr.lastPrevSeq.store(prevProcessedSeq, std::memory_order_relaxed);
+        g_instr.lastCurSeq.store(req.seq, std::memory_order_relaxed);
+        if (prevProcessedSeq > 0) {
+            uint64_t gap = req.seq - prevProcessedSeq;
+            g_instr.gapSum.fetch_add(gap, std::memory_order_relaxed);
+            g_instr.gapCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        prevProcessedSeq = req.seq;
+
+        {
+            std::lock_guard<std::mutex> blk(g_fgBufMutex);
+            seifg::presentContext(g_ctx, -1, {});
+            seifg::waitIdle();
+
+            bool snapGpu = g_ahbImportAvailable && g_ahbImagesImported;
+            if (snapGpu) {
+                auto realResetCmd = reinterpret_cast<PFN_vkResetCommandBuffer>(resolve_real(g_vkDevice, "vkResetCommandBuffer"));
+                auto realBeginCmd = reinterpret_cast<PFN_vkBeginCommandBuffer>(resolve_real(g_vkDevice, "vkBeginCommandBuffer"));
+                auto realEndCmd = reinterpret_cast<PFN_vkEndCommandBuffer>(resolve_real(g_vkDevice, "vkEndCommandBuffer"));
+                auto realCmdBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(resolve_real(g_vkDevice, "vkCmdPipelineBarrier"));
+                auto realCmdCopy = reinterpret_cast<PFN_vkCmdCopyImage>(resolve_real(g_vkDevice, "vkCmdCopyImage"));
+                auto realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(resolve_real(g_vkDevice, "vkQueueSubmit"));
+                auto realWaitFences = reinterpret_cast<PFN_vkWaitForFences>(resolve_real(g_vkDevice, "vkWaitForFences"));
+                auto realResetFences = reinterpret_cast<PFN_vkResetFences>(resolve_real(g_vkDevice, "vkResetFences"));
+
+                if (realResetCmd && realBeginCmd && realEndCmd && realCmdBarrier && realCmdCopy &&
+                    realSubmit && realWaitFences && realResetFences) {
+                    realResetCmd(g_gpuSnapCmd, 0);
+                    VkCommandBufferBeginInfo bi{};
+                    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                    realBeginCmd(g_gpuSnapCmd, &bi);
+
+                    VkImageMemoryBarrier bars[2]{};
+                    bars[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    bars[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    bars[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    bars[0].srcAccessMask = 0;
+                    bars[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    bars[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bars[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bars[0].image = g_ahbIn1Img;
+                    bars[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+                    bars[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    bars[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    bars[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    bars[1].srcAccessMask = 0;
+                    bars[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    bars[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bars[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bars[1].image = g_ahbRealImg;
+                    bars[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+                    realCmdBarrier(g_gpuSnapCmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, bars);
+
+                    VkImageCopy region{};
+                    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    region.extent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
+                    realCmdCopy(g_gpuSnapCmd, g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                g_ahbRealImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+                    realEndCmd(g_gpuSnapCmd);
+
+                    VkSubmitInfo si{};
+                    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                    si.commandBufferCount = 1;
+                    si.pCommandBuffers = &g_gpuSnapCmd;
+                    realSubmit(g_vkQueue, 1, &si, g_gpuSnapFence);
+                    realWaitFences(g_vkDevice, 1, &g_gpuSnapFence, VK_TRUE, UINT64_MAX);
+                    realResetFences(g_vkDevice, 1, &g_gpuSnapFence);
+                } else {
+                    snapGpu = false;
+                }
+            }
+
+            if (!snapGpu) {
+                AHardwareBuffer_Desc dSrc{}, dDst{};
+                AHardwareBuffer_describe(g_ahbIn1, &dSrc);
+                AHardwareBuffer_describe(g_ahbReal, &dDst);
+                void* src = nullptr;
+                void* dst = nullptr;
+                AHardwareBuffer_lock(g_ahbIn1, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &src);
+                AHardwareBuffer_lock(g_ahbReal, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &dst);
+                if (src && dst) {
+                    uint32_t rowBytes = static_cast<uint32_t>(g_vkW) * 4;
+                    for (int y = 0; y < g_vkH; ++y) {
+                        memcpy(static_cast<uint8_t*>(dst) + static_cast<size_t>(y) * dDst.stride * 4,
+                               static_cast<uint8_t*>(src) + static_cast<size_t>(y) * dSrc.stride * 4,
+                               rowBytes);
+                    }
+                }
+                AHardwareBuffer_unlock(g_ahbIn1, nullptr);
+                AHardwareBuffer_unlock(g_ahbReal, nullptr);
+            }
+
+            if (g_triggerPath[0] && access(g_triggerPath, F_OK) == 0) {
+                dump_ahb(g_ahbIn0, "seifg_in0.png", false);
+                dump_ahb(g_ahbIn1, "seifg_in1.png", false);
+                dump_ahb(g_ahbOut, "seifg_out.png", false);
+                LOG("[FgThread] triggered dump");
+                unlink(g_triggerPath);
+            }
+        }
+
+        g_instr.generated.fetch_add(1, std::memory_order_relaxed);
+
+        const int numInterp = g_cfgMultiplier - 1;
+        const int64_t period = g_scPresenter.clock().periodNs();
+        if (period <= 0) {
+            g_scPresenter.presentOne(g_ahbReal, 0);
+            framegen_instr_tick();
+            continue;
+        }
+
+        int64_t k = g_scPresenter.nextVsyncSlot();
+        const int64_t now = nowNsCapture();
+        if (k <= now)
+            k = now + period;
+
+        g_scPresenter.presentOne(g_ahbOutN[0], k);
+        for (int i = 1; i <= numInterp; i++) {
+            g_scPresenter.busyWaitUntil(k + (int64_t)(i - 1) * period);
+            const int64_t target = k + (int64_t)i * period;
+            if (i < numInterp) {
+                g_scPresenter.presentOne(g_ahbOutN[i], target);
+            } else {
+                g_scPresenter.presentOne(g_ahbReal, target);
+            }
+        }
+
+        g_scPresenter.commitBurst(k + (int64_t)numInterp * period);
+
+        framegen_instr_tick();
+    }
+    LOG("[FgThread] exiting");
+}
+
+static void start_framegen_thread() {
+    if (g_fgRunning.load(std::memory_order_relaxed)) return;
+    g_fgRunning.store(true, std::memory_order_relaxed);
+    g_fgThread = std::thread(framegen_thread_loop);
+}
+
+static void stop_framegen_thread() {
+    if (g_fgRunning.exchange(false)) {
+        std::lock_guard<std::mutex> lk(g_fgMutex);
+        g_fgCv.notify_all();
+    }
+    if (g_fgThread.joinable()) g_fgThread.join();
 }
 
 static void vk_capture_present(const VkPresentInfoKHR* pi) {
@@ -1386,130 +1915,47 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
             g_real_acquire = reinterpret_cast<PFN_vkAcquireNextImageKHR>(resolve_real(scInfo.device, "vkAcquireNextImageKHR"));
 
         if (g_seifg_inited.load()) {
-            vk_virtualized_capture(scInfo.virtualImages[virtIdx], scInfo);
+            if (!vk_virtualized_capture(scInfo.virtualImages[virtIdx], scInfo)) {
+                g_instr.dropped.fetch_add(1, std::memory_order_relaxed);
+                return VK_SUCCESS;
+            }
+            g_instr.captured.fetch_add(1, std::memory_order_relaxed);
         }
 
         bool havePrev = (g_captureCount.load() >= 2);
 
-        if (havePrev && g_vk_gen_ready.load() && g_ctx >= 0) {
-            seifg::presentContext(g_ctx, -1, {});
-            seifg::waitIdle();
-
-            if (!g_reinjectResAlloc) alloc_reinject_resources(scInfo.device);
-            if (g_reinjectResAlloc) {
-                int numInterp = g_cfgMultiplier - 1;
-                for (int i = 0; i < numInterp; ++i) {
-                    VkResult intRes = vk_reinject_present_interpolated(q, scInfo, g_ahbOutN[i]);
-                    if (intRes != VK_SUCCESS && intRes != VK_SUBOPTIMAL_KHR) {
-                        ERROR("[VkReinject] interpolated present [%d] failed %d", i, intRes);
-                        break;
-                    }
+        {
+            std::lock_guard<std::mutex> lk(g_scMu);
+            if (!g_scPresenter.ready()) {
+                auto wit = g_swapchainWindowMap.find(pi->pSwapchains[0]);
+                if (wit != g_swapchainWindowMap.end() && wit->second) {
+                    g_scPresenter.init(wit->second);
+                    g_scPresenter.setBufferTransform(g_scBufTransform);
+                    LOG("[VkSC] presenter initialized transform=%d", g_scBufTransform);
                 }
             }
+        }
 
-            uint32_t realIdx = 0;
-            VkResult acqRes = g_real_acquire(scInfo.device, scInfo.realSwapchain, UINT64_MAX,
-                                             scInfo.realAcquireSem, VK_NULL_HANDLE, &realIdx);
-            if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) {
-                ERROR("[VkReinject] real acquire failed %d", acqRes);
-                return acqRes;
+        if (havePrev && g_vk_gen_ready.load() && g_ctx >= 0 && g_scPresenter.ready()) {
+            if (!g_fgRunning.load(std::memory_order_relaxed))
+                start_framegen_thread();
+
+            {
+                std::lock_guard<std::mutex> lk(g_fgMutex);
+                uint64_t seq = g_fgSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+                g_fgPending = FgRequest{g_captureCount.load(), seq};
+                g_fgPendingValid = true;
             }
+            g_fgCv.notify_one();
 
-            vkResetCommandBuffer(scInfo.blitCmd, 0);
-            VkCommandBufferBeginInfo beginInfo{};
-            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(scInfo.blitCmd, &beginInfo);
+            return VK_SUCCESS;
+        }
 
-            VkImageMemoryBarrier barriers[2]{};
-            barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barriers[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-            barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[0].image = scInfo.virtualImages[virtIdx];
-            barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-            barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barriers[1].srcAccessMask = 0;
-            barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[1].image = scInfo.realImages[realIdx];
-            barriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-            vkCmdPipelineBarrier(scInfo.blitCmd,
-                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 2, barriers);
-
-            VkImageBlit region{};
-            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.srcOffsets[0] = {0, 0, 0};
-            region.srcOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
-                                    static_cast<int32_t>(scInfo.extent.height), 1};
-            region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.dstOffsets[0] = {0, 0, 0};
-            region.dstOffsets[1] = {static_cast<int32_t>(scInfo.extent.width),
-                                    static_cast<int32_t>(scInfo.extent.height), 1};
-            vkCmdBlitImage(scInfo.blitCmd,
-                           scInfo.virtualImages[virtIdx], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           scInfo.realImages[realIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &region, VK_FILTER_NEAREST);
-
-            VkImageMemoryBarrier postBar{};
-            postBar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            postBar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            postBar.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            postBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            postBar.dstAccessMask = 0;
-            postBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            postBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            postBar.image = scInfo.realImages[realIdx];
-            postBar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-            vkCmdPipelineBarrier(scInfo.blitCmd,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &postBar);
-
-            vkEndCommandBuffer(scInfo.blitCmd);
-
-            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            VkSubmitInfo submit{};
-            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit.waitSemaphoreCount = 1;
-            submit.pWaitSemaphores = &scInfo.realAcquireSem;
-            submit.pWaitDstStageMask = &waitStage;
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &scInfo.blitCmd;
-            submit.signalSemaphoreCount = 1;
-            submit.pSignalSemaphores = &scInfo.blitDoneSem;
-            vkQueueSubmit(g_vkQueue, 1, &submit, scInfo.blitFence);
-
-            VkPresentInfoKHR realPi{};
-            realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-            realPi.waitSemaphoreCount = 1;
-            realPi.pWaitSemaphores = &scInfo.blitDoneSem;
-            realPi.swapchainCount = 1;
-            realPi.pSwapchains = &scInfo.realSwapchain;
-            realPi.pImageIndices = &realIdx;
-            VkResult presRes = g_real_present(q, &realPi);
-
-            vkWaitForFences(scInfo.device, 1, &scInfo.blitFence, VK_TRUE, UINT64_MAX);
-            vkResetFences(scInfo.device, 1, &scInfo.blitFence);
-
-            s_virtPairCount++;
-            if (s_virtPairCount <= 3 || s_virtPairCount % 300 == 0) {
-                LOG("[VkReinject] present pair interp+real #%llu",
-                    static_cast<unsigned long long>(s_virtPairCount));
-            }
-
-            return presRes;
+        if (g_scPresenter.ready()) {
+            g_scPresenter.presentOne(g_ahbIn1, g_scPresenter.nextVsyncSlot());
+            if (n < 3 || n % 300 == 0)
+                LOG("[VkSC] first-frame passthrough #%llu", static_cast<unsigned long long>(n));
+            return VK_SUCCESS;
         }
 
         uint32_t realIdx = 0;
