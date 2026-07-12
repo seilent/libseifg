@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -38,6 +39,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
@@ -49,6 +51,53 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import kotlin.math.abs
+
+private val TealPrimary = Color(0xFF7FC8BA)
+private val TealDim = Color(0xFF4A9E8E)
+private val TealMuted = Color(0xFF2A5C53)
+private val TealContainer = Color(0xFF1E3F3A)
+private val SurfaceDark = Color(0xFF16191A)
+private val BackgroundDark = Color(0xFF0F1112)
+private val SurfaceCard = Color(0xFF1E2224)
+private val SurfaceElevated = Color(0xFF252A2C)
+private val OnSurfaceLight = Color(0xFFEAECED)
+private val OnSurfaceMuted = Color(0xFF8A9196)
+private val OutlineColor = Color(0xFF3A3F42)
+private val OutlineVariantColor = Color(0xFF2C3133)
+
+private val UnifiedShape = RoundedCornerShape(12.dp)
+
+private val SefgColorScheme = darkColorScheme(
+    primary = TealPrimary,
+    onPrimary = Color(0xFF0A1F1B),
+    primaryContainer = TealContainer,
+    onPrimaryContainer = TealPrimary,
+    secondary = TealDim,
+    onSecondary = Color(0xFF0A1F1B),
+    secondaryContainer = TealContainer,
+    onSecondaryContainer = TealPrimary,
+    tertiary = TealDim,
+    onTertiary = Color(0xFF0A1F1B),
+    tertiaryContainer = TealContainer,
+    onTertiaryContainer = TealPrimary,
+    surface = SurfaceDark,
+    onSurface = OnSurfaceLight,
+    surfaceVariant = SurfaceCard,
+    onSurfaceVariant = OnSurfaceMuted,
+    background = BackgroundDark,
+    onBackground = OnSurfaceLight,
+    outline = OutlineColor,
+    outlineVariant = OutlineVariantColor
+)
+
+@Composable
+fun Modifier.dpadFocusHighlight(focused: Boolean): Modifier {
+    return if (focused) {
+        this
+            .border(3.dp, TealPrimary, UnifiedShape)
+            .background(TealPrimary.copy(alpha = 0.08f), UnifiedShape)
+    } else this
+}
 
 data class AppEntry(
     val label: String,
@@ -105,30 +154,12 @@ suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
     }
 }
 
-private val TealAccent = Color(0xFF5C9E9E)
-private val TealAccentDim = Color(0xFF3D7A7A)
-private val SurfaceDim = Color(0xFF1A1C1E)
-private val SurfaceCard = Color(0xFF222528)
-private val SurfaceElevated = Color(0xFF2A2D31)
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val colorScheme = darkColorScheme(
-                primary = TealAccent,
-                onPrimary = Color.White,
-                primaryContainer = TealAccentDim,
-                onPrimaryContainer = Color.White,
-                surface = SurfaceDim,
-                surfaceVariant = SurfaceCard,
-                onSurface = Color(0xFFE2E2E6),
-                onSurfaceVariant = Color(0xFF9B9DA2),
-                outline = Color(0xFF44474C),
-                outlineVariant = Color(0xFF333639)
-            )
-            MaterialTheme(colorScheme = colorScheme) {
-                Surface(modifier = Modifier.fillMaxSize(), color = SurfaceDim) {
+            MaterialTheme(colorScheme = SefgColorScheme) {
+                Surface(modifier = Modifier.fillMaxSize(), color = BackgroundDark) {
                     ConfigScreen()
                 }
             }
@@ -164,7 +195,6 @@ fun ConfigScreen() {
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var configs by remember { mutableStateOf(mutableMapOf<String, AppConfig>()) }
     var searchQuery by remember { mutableStateOf("") }
-    var snackMessage by remember { mutableStateOf<String?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var initialLoadDone by remember { mutableStateOf(false) }
     var searchActive by remember { mutableStateOf(false) }
@@ -234,14 +264,6 @@ fun ConfigScreen() {
         if (!initialLoadDone || hasRoot != true) return@LaunchedEffect
         delay(500)
         writeConfig(configs, context.cacheDir)
-        snackMessage = "Saved"
-    }
-
-    LaunchedEffect(snackMessage) {
-        if (snackMessage != null) {
-            delay(1500)
-            snackMessage = null
-        }
     }
 
     val filtered = remember(apps, searchQuery) {
@@ -265,7 +287,7 @@ fun ConfigScreen() {
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.5.sp
                 ),
-                color = TealAccent
+                color = TealPrimary
             )
 
             Spacer(Modifier.width(16.dp))
@@ -296,11 +318,11 @@ fun ConfigScreen() {
                     placeholder = { Text("Search apps", fontSize = 14.sp) },
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = UnifiedShape,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = TealAccent,
+                        focusedBorderColor = TealPrimary,
                         unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                        cursorColor = TealAccent
+                        cursorColor = TealPrimary
                     ),
                     textStyle = MaterialTheme.typography.bodyMedium
                 )
@@ -317,15 +339,11 @@ fun ConfigScreen() {
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .clip(UnifiedShape)
+                        .dpadFocusHighlight(searchFocused)
                         .background(
-                            if (searchFocused) MaterialTheme.colorScheme.surfaceVariant
-                            else Color.Transparent
-                        )
-                        .then(
-                            if (searchFocused) Modifier.background(Color.Transparent)
-                                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(14.dp))
-                            else Modifier
+                            if (searchFocused) SurfaceElevated else Color.Transparent,
+                            UnifiedShape
                         )
                         .clickable(
                             interactionSource = searchInteraction,
@@ -340,7 +358,7 @@ fun ConfigScreen() {
                             Icons.Default.Search,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
-                            tint = if (searchFocused) TealAccent else MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = if (searchFocused) TealPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
@@ -361,13 +379,15 @@ fun ConfigScreen() {
             Box(
                 modifier = Modifier
                     .size(48.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(UnifiedShape)
+                    .dpadFocusHighlight(gearFocused)
                     .background(
                         when {
-                            advanced -> TealAccent
-                            gearFocused -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                            advanced -> TealPrimary
+                            gearFocused -> SurfaceElevated
                             else -> SurfaceElevated
-                        }
+                        },
+                        UnifiedShape
                     )
                     .clickable(
                         interactionSource = gearInteraction,
@@ -390,7 +410,7 @@ fun ConfigScreen() {
         if (hasRoot == false) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                shape = RoundedCornerShape(14.dp),
+                shape = UnifiedShape,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -406,7 +426,7 @@ fun ConfigScreen() {
 
         if (apps.isEmpty() && hasRoot != null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = TealAccent, strokeWidth = 3.dp)
+                CircularProgressIndicator(color = TealPrimary, strokeWidth = 3.dp)
             }
         } else {
             LazyColumn(
@@ -444,27 +464,9 @@ fun ConfigScreen() {
         }
     }
 
-    snackMessage?.let { msg ->
-        Box(
-            modifier = Modifier.fillMaxSize().padding(bottom = 16.dp),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = SurfaceElevated,
-                tonalElevation = 4.dp
-            ) {
-                Text(
-                    msg,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TealAccent
-                )
-            }
-        }
-    }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppRow(
     app: AppEntry,
@@ -478,10 +480,14 @@ fun AppRow(
     val multiplierOptions = if (advanced) listOf(1, 2, 3) else listOf(1, 2, 3).filter { validOutputs(refreshHz, it, minBase).isNotEmpty() }
     val qualityLabels = listOf("Perf", "Bal", "High")
 
+    var rowFocused by remember { mutableStateOf(false) }
+
     val rowModifier = Modifier
         .padding(horizontal = 12.dp, vertical = 3.dp)
-        .clip(RoundedCornerShape(14.dp))
-        .background(if (config.enabled) SurfaceCard else Color.Transparent)
+        .clip(UnifiedShape)
+        .onFocusChanged { rowFocused = it.hasFocus }
+        .dpadFocusHighlight(rowFocused)
+        .background(if (config.enabled) SurfaceCard else Color.Transparent, UnifiedShape)
         .padding(horizontal = 12.dp, vertical = 8.dp)
         .let { mod -> if (focusRequester != null) mod.focusRequester(focusRequester) else mod }
         .focusGroup()
@@ -511,7 +517,7 @@ fun AppRow(
                 onCheckedChange = { onUpdate(config.copy(enabled = it)) },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
-                    checkedTrackColor = TealAccent,
+                    checkedTrackColor = TealPrimary,
                     uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     uncheckedTrackColor = Color.Transparent,
                     uncheckedBorderColor = MaterialTheme.colorScheme.outline
@@ -537,7 +543,14 @@ fun AppRow(
                                         val snapped = snapToNearest(config.targetFps, newValid)
                                         onUpdate(config.copy(multiplier = mult, targetFps = snapped))
                                     },
-                                    shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size)
+                                    shape = SegmentedButtonDefaults.itemShape(index, multiplierOptions.size, baseShape = UnifiedShape),
+                                    icon = {},
+                                    colors = SegmentedButtonDefaults.colors(
+                                        activeContainerColor = TealContainer,
+                                        activeContentColor = TealPrimary,
+                                        inactiveContainerColor = Color.Transparent,
+                                        inactiveContentColor = OnSurfaceMuted
+                                    )
                                 ) {
                                     Text("${mult}x", fontSize = 13.sp)
                                 }
@@ -549,14 +562,41 @@ fun AppRow(
                     Column(modifier = Modifier.weight(1.2f)) {
                         Text("Output FPS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(4.dp))
-                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                            outputs.forEachIndexed { index, fps ->
-                                SegmentedButton(
-                                    selected = config.targetFps == fps,
-                                    onClick = { onUpdate(config.copy(targetFps = fps)) },
-                                    shape = SegmentedButtonDefaults.itemShape(index, outputs.size)
-                                ) {
-                                    Text("$fps", fontSize = 13.sp)
+                        if (outputs.size == 1) {
+                            Box(
+                                modifier = Modifier
+                                    .height(40.dp)
+                                    .widthIn(min = 56.dp)
+                                    .border(1.dp, OutlineColor, UnifiedShape)
+                                    .background(TealContainer, UnifiedShape)
+                                    .padding(horizontal = 16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "${outputs.first()}",
+                                    fontSize = 13.sp,
+                                    color = TealPrimary,
+                                    fontWeight = FontWeight.Medium,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                outputs.forEachIndexed { index, fps ->
+                                    SegmentedButton(
+                                        selected = config.targetFps == fps,
+                                        onClick = { onUpdate(config.copy(targetFps = fps)) },
+                                        shape = SegmentedButtonDefaults.itemShape(index, outputs.size, baseShape = UnifiedShape),
+                                        icon = {},
+                                        colors = SegmentedButtonDefaults.colors(
+                                            activeContainerColor = TealContainer,
+                                            activeContentColor = TealPrimary,
+                                            inactiveContainerColor = Color.Transparent,
+                                            inactiveContentColor = OnSurfaceMuted
+                                        )
+                                    ) {
+                                        Text("$fps", fontSize = 13.sp)
+                                    }
                                 }
                             }
                         }
@@ -571,7 +611,14 @@ fun AppRow(
                                     SegmentedButton(
                                         selected = config.quality == index,
                                         onClick = { onUpdate(config.copy(quality = index)) },
-                                        shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size)
+                                        shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size, baseShape = UnifiedShape),
+                                        icon = {},
+                                        colors = SegmentedButtonDefaults.colors(
+                                            activeContainerColor = TealContainer,
+                                            activeContentColor = TealPrimary,
+                                            inactiveContainerColor = Color.Transparent,
+                                            inactiveContentColor = OnSurfaceMuted
+                                        )
                                     ) {
                                         Text(label, fontSize = 12.sp)
                                     }
