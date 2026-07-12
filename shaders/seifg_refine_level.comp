@@ -41,7 +41,7 @@ void main() {
     vec2 uv = (vec2(coord) + 0.5) / vec2(pc.resolution);
     vec2 mv = texture(mvCoarser, uv).rg * 2.0;
 
-    if (pc.level == 0) {
+    if (pc.level < pc._pad) {
         imageStore(mvRefined, ivec2(coord), vec4(mv, 0.0, 0.0));
         return;
     }

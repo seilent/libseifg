@@ -101,6 +101,13 @@ void finalize() {
     g_engine = nullptr;
 }
 
+void setFlowDownscale(uint32_t levels) {
+    if (!g_engine) return;
+    if (levels < 1) levels = 1;
+    if (levels > PYRAMID_LEVELS - 2) levels = PYRAMID_LEVELS - 2;
+    g_engine->upscaleOnlyLevels = levels;
+}
+
 VkDevice getDevice() {
     return g_engine ? g_engine->device.device : VK_NULL_HANDLE;
 }

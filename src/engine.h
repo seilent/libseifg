@@ -52,6 +52,7 @@ struct Engine {
     uint32_t width = 0;
     uint32_t height = 0;
     int quality = 2;
+    uint32_t upscaleOnlyLevels = 1;
     bool useQcom = false;
     bool useCubicWarp = false;
 

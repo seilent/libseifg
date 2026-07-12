@@ -34,6 +34,8 @@ void deleteContext(int32_t id);
 
 void finalize();
 
+void setFlowDownscale(uint32_t upscaleOnlyLevels);
+
 VkDevice getDevice();
 VkPhysicalDevice getPhysicalDevice();
 

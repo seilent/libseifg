@@ -14,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint level;
     float threshold;
     float temperature;
-    uint _pad;
+    uint upscaleOnlyLevels;
 } pc;
 
 layout(constant_id = 0) const int ITERS = 2;
@@ -27,7 +27,7 @@ void main() {
     vec2 uv = (vec2(coord) + 0.5) * invRes;
     vec2 g = texture(coarserFlow, uv).rg * 2.0;
 
-    if (pc.level == 0) {
+    if (pc.level < pc.upscaleOnlyLevels) {
         imageStore(flowOut, coord, vec4(g, 0.0, 0.0));
         return;
     }

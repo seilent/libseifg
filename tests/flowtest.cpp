@@ -402,6 +402,7 @@ int main(int argc, char** argv) {
     const int SHIFT = (argc > 1) ? atoi(argv[1]) : 12;
     const int M = (argc > 2) ? atoi(argv[2]) : 2;
     const uint32_t quality = (argc > 3) ? (uint32_t)atoi(argv[3]) : 2;
+    const uint32_t uoLevels = (argc > 4) ? (uint32_t)atoi(argv[4]) : 1;
     const int N = M - 1;
     if (M < 2 || N > 3) { printf("FAIL: multiplier must be 2..4\n"); return 1; }
 
@@ -414,10 +415,11 @@ int main(int argc, char** argv) {
 
     fillShifted(in0, 0);
     fillShifted(in1, -2 * SHIFT);
-    printf("=== multiplier %dx, quality %u, pan right +%dpx (leading edge = right) ===\n",
-           M, quality, 2 * SHIFT);
+    printf("=== multiplier %dx, quality %u, upscaleOnlyLevels %u, pan right +%dpx (leading edge = right) ===\n",
+           M, quality, uoLevels, 2 * SHIFT);
 
     seifg::initialize(0, false, quality, (uint64_t)M, {});
+    seifg::setFlowDownscale(uoLevels);
     int32_t ctx = seifg::createContextFromAHB(in0, in1, outs, VkExtent2D{W, H},
                                               VK_FORMAT_R8G8B8A8_UNORM);
     if (ctx < 0) { printf("FAIL: createContext=%d\n", ctx); return 1; }

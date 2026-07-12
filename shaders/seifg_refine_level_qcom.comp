@@ -35,7 +35,7 @@ void main() {
     ivec2 coarseCoord = ivec2(coord) / 2;
     vec2 mv = imageLoad(mvCoarser, coarseCoord).rg * 2.0;
 
-    if (pc.level == 0) {
+    if (pc.level < pc._pad) {
         imageStore(mvRefined, ivec2(coord), vec4(mv, 0.0, 0.0));
         return;
     }

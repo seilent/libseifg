@@ -337,6 +337,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     pc.flowScale = 0.0f;
     pc.threshold = 4.0f;
     pc.temperature = 5.0f;
+    pc.upscaleOnlyLevels = upscaleOnlyLevels;
 
     auto dispatch = [&](Pipeline& p, VkDescriptorSet ds, uint32_t dw, uint32_t dh) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
@@ -459,6 +460,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     pc.flowScale = 0.0f;
     pc.threshold = 4.0f;
     pc.temperature = 5.0f;
+    pc.upscaleOnlyLevels = upscaleOnlyLevels;
 
     auto dispatch = [&](Pipeline& p, VkDescriptorSet ds, uint32_t dw, uint32_t dh) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
