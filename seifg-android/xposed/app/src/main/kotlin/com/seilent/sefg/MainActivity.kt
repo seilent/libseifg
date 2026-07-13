@@ -111,7 +111,8 @@ data class AppConfig(
     var enabled: Boolean = false,
     var targetFps: Int = 60,
     var multiplier: Int = 2,
-    var quality: Int = 0
+    var quality: Int = 0,
+    var renderScale: Float = 1.0f
 )
 
 fun validOutputs(refreshHz: Int, multiplier: Int, minBase: Int = 30): List<Int> {
@@ -142,6 +143,7 @@ suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
                 entry.put("multiplier", cfg.multiplier)
                 entry.put("quality", cfg.quality)
                 entry.put("target_fps", cfg.targetFps)
+                entry.put("render_scale", cfg.renderScale)
                 custom.put(pkg, entry)
             }
         }
@@ -153,6 +155,16 @@ suspend fun writeConfig(configs: Map<String, AppConfig>, cacheDir: File) {
         Shell.cmd(
             "cp ${cacheFile.absolutePath} /data/local/tmp/TargetList.json && chmod 644 /data/local/tmp/TargetList.json"
         ).exec()
+
+        val scaleCmds = configs.entries.joinToString(" ; ") { (pkg, cfg) ->
+            val path = "/sdcard/Android/data/$pkg/files/seifg_render_scale"
+            if (cfg.enabled && cfg.renderScale < 0.999f) {
+                "mkdir -p /sdcard/Android/data/$pkg/files && echo ${String.format("%.3f", cfg.renderScale)} > $path && chmod 644 $path"
+            } else {
+                "rm -f $path"
+            }
+        }
+        Shell.cmd(scaleCmds).exec()
     }
 }
 
@@ -302,12 +314,14 @@ fun ConfigScreen() {
                                 val fps = obj.optInt("fps", 30)
                                 val targetFps = obj.optInt("target_fps", fps * effMult)
                                 val quality = obj.optInt("quality", 0).coerceIn(0, 2)
+                                val rs = obj.optDouble("render_scale", 1.0).toFloat().coerceIn(0.1f, 1.0f)
                                 val valid = validOutputs(refreshHz, effMult)
                                 map[key] = AppConfig(
                                     enabled = true,
                                     targetFps = snapToNearest(targetFps, valid),
                                     multiplier = effMult,
-                                    quality = quality
+                                    quality = quality,
+                                    renderScale = rs
                                 )
                             }
                             configs = map
@@ -644,6 +658,18 @@ fun AppCard(
                                     onClick = { onUpdate(config.copy(quality = index)) }
                                 )
                             }
+                        }
+                    }
+
+                    ControlGroup("RESOLUTION") {
+                        val scaleOptions = listOf(1.0f to "Native", 0.85f to "85%", 0.75f to "75%", 0.67f to "67%", 0.5f to "50%")
+                        scaleOptions.forEach { (value, label) ->
+                            ControlChip(
+                                label = label,
+                                selected = abs(config.renderScale - value) < 0.001f,
+                                focused = false,
+                                onClick = { onUpdate(config.copy(renderScale = value)) }
+                            )
                         }
                     }
                 }

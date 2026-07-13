@@ -44,8 +44,6 @@ android {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
-
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
