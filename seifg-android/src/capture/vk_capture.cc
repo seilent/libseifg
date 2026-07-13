@@ -58,7 +58,8 @@ static pfn_sh_to_errmsg p_sh_to_errmsg = nullptr;
 
 static bool load_shadowhook() {
     if (g_sh_handle) return true;
-    g_sh_handle = dlopen("libshadowhook.so", RTLD_NOW | RTLD_GLOBAL);
+    g_sh_handle = dlopen("/system/lib64/libshadowhook.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!g_sh_handle) g_sh_handle = dlopen("libshadowhook.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_sh_handle) { ERROR("[Install] dlopen libshadowhook.so failed: %s", dlerror()); return false; }
     p_sh_init = (pfn_sh_init)dlsym(g_sh_handle, "shadowhook_init");
     p_sh_hook_sym_name = (pfn_sh_hook_sym_name)dlsym(g_sh_handle, "shadowhook_hook_sym_name");
