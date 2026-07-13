@@ -2,6 +2,13 @@
 
 Frame interpolation for Adreno. ~7 ms a frame at 720p on an Adreno 740.
 
+## Frontends
+
+libseifg is a static lib. Two frontends in this repo drive it.
+
+- `seifg-android`: a Zygisk module. Injects a whitelisted game, captures its frames (GLES or Vulkan), runs the engine, and presents the generated frames with an SGSR upscale to the panel. The SeFG app (`com.seilent.sefg`) sets per game framegen, multiplier, output FPS, quality, and resolution scale. Root with ZygiskNext.
+- `seifg-vk` and `seifg-decky`: a Vulkan present-interception layer for Linux gamescope handhelds. The SeiFG Decky plugin installs it and sets per game 2x and 3x through a `~/seifg %command%` launch option.
+
 ## Pipeline
 
 Compute only, 6 level pyramid.
