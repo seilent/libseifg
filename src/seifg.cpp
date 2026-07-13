@@ -25,7 +25,7 @@ void initialize(uint64_t deviceUUID,
 int32_t createContextFromAHB(
     AHardwareBuffer* in0, AHardwareBuffer* in1,
     const std::vector<AHardwareBuffer*>& outN,
-    VkExtent2D extent, VkFormat format) {
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent) {
     if (!g_engine) return -1;
 
     VkDevice dev = g_engine->device.device;
@@ -39,13 +39,16 @@ int32_t createContextFromAHB(
     if (!g_in0.createFromAHB(dev, phys, in0, extent, format)) return -1;
     if (!g_in1.createFromAHB(dev, phys, in1, extent, format)) return -1;
 
+    bool upscale = (outExtent.width > extent.width && outExtent.height > extent.height);
+    VkExtent2D outE = upscale ? outExtent : extent;
+
     g_outN.resize(outN.size());
     for (size_t i = 0; i < outN.size(); ++i) {
-        if (!g_outN[i].createFromAHB(dev, phys, outN[i], extent, format))
+        if (!g_outN[i].createFromAHB(dev, phys, outN[i], outE, format))
             return -1;
     }
 
-    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
+    if (!g_engine->createResources(extent.width, extent.height, format, upscale ? outExtent.width : 0, upscale ? outExtent.height : 0)) return -1;
 
     g_ctxId = rand();
     return g_ctxId;
@@ -55,7 +58,7 @@ int32_t createContextFromAHB(
 int32_t createContextFromImages(
     VkImage in0, VkImage in1,
     const std::vector<VkImage>& outN,
-    VkExtent2D extent, VkFormat format) {
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent) {
     if (!g_engine) return -1;
 
     VkDevice dev = g_engine->device.device;
@@ -68,13 +71,16 @@ int32_t createContextFromImages(
     if (!g_in0.wrapExternal(dev, in0, extent, format)) return -1;
     if (!g_in1.wrapExternal(dev, in1, extent, format)) return -1;
 
+    bool upscale = (outExtent.width > extent.width && outExtent.height > extent.height);
+    VkExtent2D outE = upscale ? outExtent : extent;
+
     g_outN.resize(outN.size());
     for (size_t i = 0; i < outN.size(); ++i) {
-        if (!g_outN[i].wrapExternal(dev, outN[i], extent, format))
+        if (!g_outN[i].wrapExternal(dev, outN[i], outE, format))
             return -1;
     }
 
-    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
+    if (!g_engine->createResources(extent.width, extent.height, format, upscale ? outExtent.width : 0, upscale ? outExtent.height : 0)) return -1;
 
     g_ctxId = rand();
     return g_ctxId;
@@ -126,7 +132,7 @@ void waitIdle() {
 #if defined(__linux__) && !defined(__ANDROID__)
 int32_t createContextFromFd(int in0Fd, int in1Fd,
     const std::vector<int>& outFds,
-    VkExtent2D extent, VkFormat format) {
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent) {
     if (!g_engine) return -1;
 
     VkDevice dev = g_engine->device.device;
@@ -145,9 +151,12 @@ int32_t createContextFromFd(int in0Fd, int in1Fd,
         return -1;
     }
 
+    bool upscale = (outExtent.width > extent.width && outExtent.height > extent.height);
+    VkExtent2D outE = upscale ? outExtent : extent;
+
     g_outN.resize(outFds.size());
     for (size_t i = 0; i < outFds.size(); ++i) {
-        if (!g_outN[i].createFromFd(dev, phys, outFds[i], extent, format, dstUsage)) {
+        if (!g_outN[i].createFromFd(dev, phys, outFds[i], outE, format, dstUsage)) {
             g_in0.destroy(dev);
             g_in1.destroy(dev);
             for (size_t j = 0; j < i; ++j) g_outN[j].destroy(dev);
@@ -156,7 +165,7 @@ int32_t createContextFromFd(int in0Fd, int in1Fd,
         }
     }
 
-    if (!g_engine->createResources(extent.width, extent.height, format)) return -1;
+    if (!g_engine->createResources(extent.width, extent.height, format, upscale ? outExtent.width : 0, upscale ? outExtent.height : 0)) return -1;
 
     g_ctxId = rand();
     return g_ctxId;

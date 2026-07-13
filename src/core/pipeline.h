@@ -14,6 +14,9 @@ struct SeifgPushConstants {
     float threshold;
     float temperature;
     uint32_t upscaleOnlyLevels;
+    uint32_t outWidth;
+    uint32_t outHeight;
+    float sharpness;
 };
 
 struct Pipeline {

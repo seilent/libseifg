@@ -27,6 +27,7 @@ struct Engine {
     Pipeline occlusionPipeline;
     Pipeline warpPipeline;
     Pipeline blendPipeline;
+    Pipeline sgsrPipeline;
 
     Image lumaPrev[PYRAMID_LEVELS];
     Image lumaCurr[PYRAMID_LEVELS];
@@ -38,6 +39,7 @@ struct Engine {
     Image confidence;
     Image warpedForward;
     Image warpedBackward;
+    Image interpResult[MAX_OUTPUTS];
 
     VkDescriptorSet dsLumaConvert[2]{};
     VkDescriptorSet dsPyramid[2 * (PYRAMID_LEVELS - 1)]{};
@@ -48,20 +50,26 @@ struct Engine {
     VkDescriptorSet dsOcclusion{};
     VkDescriptorSet dsWarp[2]{};
     VkDescriptorSet dsBlend[MAX_OUTPUTS]{};
+    VkDescriptorSet dsSgsr[MAX_OUTPUTS]{};
 
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t outWidth = 0;
+    uint32_t outHeight = 0;
+    float sgsrSharpness = 0.5f;
     int quality = 2;
     uint32_t upscaleOnlyLevels = 1;
     bool useQcom = false;
     bool useCubicWarp = false;
+
+    bool upscaling() const { return outWidth > width && outHeight > height; }
 
     bool init(uint64_t deviceUUID, uint32_t quality);
 #if defined(__linux__) && !defined(__ANDROID__)
     bool initWithPicker(const std::function<bool(const std::string& name, uint32_t vendorID, uint32_t deviceID)>& picker, uint32_t quality);
 #endif
     void destroy();
-    bool createResources(uint32_t w, uint32_t h, VkFormat frameFormat);
+    bool createResources(uint32_t w, uint32_t h, VkFormat frameFormat, uint32_t outW = 0, uint32_t outH = 0);
     void destroyResources();
     bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut);
     bool recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOut,

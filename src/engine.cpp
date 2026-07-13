@@ -117,6 +117,9 @@ bool Engine::init(uint64_t deviceUUID, uint32_t q) {
     if (!initPipeline(warpPipeline, dev, shaders::seifg_warp_spv, shaders::seifg_warp_spv_size, warpTypes, 3)) return false;
     if (!initPipeline(blendPipeline, dev, shaders::seifg_blend_spv, shaders::seifg_blend_spv_size, blendTypes, 6)) return false;
 
+    VkDescriptorType sgsrTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    if (!initPipeline(sgsrPipeline, dev, shaders::seifg_sgsr_spv, shaders::seifg_sgsr_spv_size, sgsrTypes, 2)) return false;
+
     return true;
 }
 
@@ -163,14 +166,19 @@ bool Engine::initWithPicker(const std::function<bool(const std::string& name, ui
     if (!initPipeline(warpPipeline, dev, shaders::seifg_warp_spv, shaders::seifg_warp_spv_size, warpTypes, 3)) return false;
     if (!initPipeline(blendPipeline, dev, shaders::seifg_blend_spv, shaders::seifg_blend_spv_size, blendTypes, 6)) return false;
 
+    VkDescriptorType sgsrTypes[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    if (!initPipeline(sgsrPipeline, dev, shaders::seifg_sgsr_spv, shaders::seifg_sgsr_spv_size, sgsrTypes, 2)) return false;
+
     return true;
 }
 #endif
 
-bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
+bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat, uint32_t outW, uint32_t outH) {
     destroyResources();
     width = w;
     height = h;
+    outWidth = outW;
+    outHeight = outH;
 
     useCubicWarp = false;
     if (device.hasFilterCubic && samplers.cubic != VK_NULL_HANDLE) {
@@ -215,6 +223,12 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
     if (!warpedForward.createInternal(dev, phys, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, usage)) return false;
     if (!warpedBackward.createInternal(dev, phys, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, usage)) return false;
 
+    if (upscaling()) {
+        for (uint32_t i = 0; i < MAX_OUTPUTS; i++) {
+            if (!interpResult[i].createInternal(dev, phys, frameFormat, w, h, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return false;
+        }
+    }
+
     auto& pool = descriptorPool;
     VkImageLayout general = VK_IMAGE_LAYOUT_GENERAL;
 
@@ -244,6 +258,13 @@ bool Engine::createResources(uint32_t w, uint32_t h, VkFormat frameFormat) {
     if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend[0])) return false;
     for (uint32_t i = 1; i < MAX_OUTPUTS; i++) {
         if (!pool.allocate(dev, blendPipeline.descriptorSetLayout, &dsBlend[i])) return false;
+    }
+
+    if (upscaling()) {
+        for (uint32_t i = 0; i < MAX_OUTPUTS; i++) {
+            if (!pool.allocate(dev, sgsrPipeline.descriptorSetLayout, &dsSgsr[i])) return false;
+            pool.updateCombinedImageSampler(dev, dsSgsr[i], 0, interpResult[i].view, samplers.bilinear, general);
+        }
     }
 
     for (uint32_t i = 0; i < PYRAMID_LEVELS - 1; i++) {
@@ -328,7 +349,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     for (uint32_t i = 0; i < numOut; i++) {
         descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 3, in0.view, samplers.bilinear, general);
         descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 4, in1.view, samplers.bilinear, general);
-        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, outs[i].view, general);
+        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, upscaling() ? interpResult[i].view : outs[i].view, general);
     }
 
     SeifgPushConstants pc{};
@@ -411,7 +432,19 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
         pc.t = ti;
         barrierMulti(cmd, warpOut, 2);
         dispatch(blendPipeline, dsBlend[i], width, height);
-        barrier(cmd, outs[i].image);
+        if (upscaling()) {
+            barrier(cmd, interpResult[i].image);
+            descriptorPool.updateStorageImage(dev, dsSgsr[i], 1, outs[i].view, general);
+            pc.outWidth = outWidth;
+            pc.outHeight = outHeight;
+            pc.sharpness = sgsrSharpness;
+            dispatch(sgsrPipeline, dsSgsr[i], outWidth, outHeight);
+            barrier(cmd, outs[i].image);
+            pc.outWidth = 0;
+            pc.outHeight = 0;
+        } else {
+            barrier(cmd, outs[i].image);
+        }
     }
 
     externalRelease(cmd, in0.image, qf);
@@ -451,7 +484,7 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
     for (uint32_t i = 0; i < numOut; i++) {
         descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 3, in0.view, samplers.bilinear, general);
         descriptorPool.updateCombinedImageSampler(dev, dsBlend[i], 4, in1.view, samplers.bilinear, general);
-        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, outs[i].view, general);
+        descriptorPool.updateStorageImage(dev, dsBlend[i], 5, upscaling() ? interpResult[i].view : outs[i].view, general);
     }
 
     SeifgPushConstants pc{};
@@ -534,7 +567,19 @@ bool Engine::recordAndSubmit(Image& in0, Image& in1, Image* outs, uint32_t numOu
         pc.t = ti;
         barrierMulti(cmd, warpOut, 2);
         dispatch(blendPipeline, dsBlend[i], width, height);
-        barrier(cmd, outs[i].image);
+        if (upscaling()) {
+            barrier(cmd, interpResult[i].image);
+            descriptorPool.updateStorageImage(dev, dsSgsr[i], 1, outs[i].view, general);
+            pc.outWidth = outWidth;
+            pc.outHeight = outHeight;
+            pc.sharpness = sgsrSharpness;
+            dispatch(sgsrPipeline, dsSgsr[i], outWidth, outHeight);
+            barrier(cmd, outs[i].image);
+            pc.outWidth = 0;
+            pc.outHeight = 0;
+        } else {
+            barrier(cmd, outs[i].image);
+        }
     }
 
     externalRelease(cmd, in0.image, qf);
@@ -599,6 +644,8 @@ void Engine::destroyResources() {
     confidence.destroy(dev);
     warpedForward.destroy(dev);
     warpedBackward.destroy(dev);
+    for (uint32_t i = 0; i < MAX_OUTPUTS; i++)
+        interpResult[i].destroy(dev);
     if (descriptorPool.pool != VK_NULL_HANDLE)
         vkResetDescriptorPool(dev, descriptorPool.pool, 0);
 }
@@ -620,6 +667,7 @@ void Engine::destroy() {
     occlusionPipeline.destroy(dev);
     warpPipeline.destroy(dev);
     blendPipeline.destroy(dev);
+    sgsrPipeline.destroy(dev);
     descriptorPool.destroy(dev);
     commands.destroy(dev);
     samplers.destroy(dev);

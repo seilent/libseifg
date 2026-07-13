@@ -1,0 +1,144 @@
+/*
+ * Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D uInput;
+layout(binding = 1, rgba8) uniform writeonly image2D uOutput;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    float flowScale;
+    float t;
+    uint level;
+    float threshold;
+    float temperature;
+    uint upscaleOnlyLevels;
+    uint outWidth;
+    uint outHeight;
+    float sharpness;
+} pc;
+
+float fastLanczos2(float x) {
+    float wA = x - 4.0;
+    float wB = x * wA - wA;
+    wA *= wA;
+    return wB * wA;
+}
+
+vec2 weightY(float dx, float dy, float c, vec3 data) {
+    float std = data.x;
+    vec2 dir = data.yz;
+    float edgeDis = ((dx * dir.y) + (dy * dir.x));
+    float x = (((dx * dx) + (dy * dy)) + ((edgeDis * edgeDis) * ((clamp(((c * c) * std), 0.0, 1.0) * 0.7) + -1.0)));
+    float w = fastLanczos2(x);
+    return vec2(w, w * c);
+}
+
+vec2 edgeDirection(vec4 left, vec4 right) {
+    float RxLz = (right.x + (-left.z));
+    float RwLy = (right.w + (-left.y));
+    vec2 delta;
+    delta.x = (RxLz + RwLy);
+    delta.y = (RxLz + (-RwLy));
+    float lengthInv = inversesqrt((delta.x * delta.x + 3.075740e-05) + (delta.y * delta.y));
+    return vec2(delta.x * lengthInv, delta.y * lengthInv);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pc.outWidth || gid.y >= pc.outHeight) return;
+
+    vec2 uv = (vec2(gid) + 0.5) / vec2(float(pc.outWidth), float(pc.outHeight));
+
+    vec4 ViewportInfo = vec4(1.0 / float(pc.width), 1.0 / float(pc.height), float(pc.width), float(pc.height));
+    float EdgeThreshold = 8.0 / 255.0;
+    float EdgeSharpness = 1.0 + pc.sharpness * 2.0;
+
+    vec2 MODIFIED_TEXCOORD = floor(uv * vec2(float(pc.outWidth), float(pc.outHeight))) / vec2(float(pc.outWidth), float(pc.outHeight));
+    vec3 color = textureLod(uInput, MODIFIED_TEXCOORD, 0.0).rgb;
+    float colorG = color.g;
+
+    vec2 imgCoord = MODIFIED_TEXCOORD * ViewportInfo.zw + vec2(-0.5, 0.5);
+    vec2 imgCoordPixel = floor(imgCoord);
+    vec2 coord = imgCoordPixel * ViewportInfo.xy;
+    vec2 pl = imgCoord - imgCoordPixel;
+
+    vec4 left = textureGather(uInput, coord, 1);
+    float edgeVote = abs(left.z - left.y) + abs(colorG - left.y) + abs(colorG - left.z);
+
+    if (edgeVote > EdgeThreshold) {
+        coord.x += ViewportInfo.x;
+        vec4 right = textureGather(uInput, coord + vec2(ViewportInfo.x, 0.0), 1);
+        vec4 upDown;
+        upDown.xy = textureGather(uInput, coord + vec2(0.0, -ViewportInfo.y), 1).wz;
+        upDown.zw = textureGather(uInput, coord + vec2(0.0, ViewportInfo.y), 1).yx;
+
+        float mean = (left.y + left.z + right.x + right.w) * 0.25;
+        left -= mean;
+        right -= mean;
+        upDown -= mean;
+        float cw = colorG - mean;
+
+        float sum = abs(left.x) + abs(left.y) + abs(left.z) + abs(left.w)
+                  + abs(right.x) + abs(right.y) + abs(right.z) + abs(right.w)
+                  + abs(upDown.x) + abs(upDown.y) + abs(upDown.z) + abs(upDown.w);
+        float sumMean = 1.014185e+01 / sum;
+        float std = sumMean * sumMean;
+
+        vec3 data = vec3(std, edgeDirection(left, right));
+
+        vec2 aWY  = weightY(pl.x,       pl.y + 1.0, upDown.x, data);
+        aWY      += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, data);
+        aWY      += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, data);
+        aWY      += weightY(pl.x,       pl.y - 2.0, upDown.w, data);
+        aWY      += weightY(pl.x + 1.0, pl.y - 1.0, left.x,  data);
+        aWY      += weightY(pl.x,       pl.y - 1.0, left.y,  data);
+        aWY      += weightY(pl.x,       pl.y,       left.z,  data);
+        aWY      += weightY(pl.x + 1.0, pl.y,       left.w,  data);
+        aWY      += weightY(pl.x - 1.0, pl.y - 1.0, right.x, data);
+        aWY      += weightY(pl.x - 2.0, pl.y - 1.0, right.y, data);
+        aWY      += weightY(pl.x - 2.0, pl.y,       right.z, data);
+        aWY      += weightY(pl.x - 1.0, pl.y,       right.w, data);
+
+        float finalY = aWY.y / aWY.x;
+        float maxY = max(max(left.y, left.z), max(right.x, right.w));
+        float minY = min(min(left.y, left.z), min(right.x, right.w));
+        float deltaY = clamp(EdgeSharpness * finalY, minY, maxY) - cw;
+        deltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);
+        color = clamp(color + deltaY, 0.0, 1.0);
+    }
+
+    imageStore(uOutput, ivec2(gid), vec4(color, 1.0));
+}

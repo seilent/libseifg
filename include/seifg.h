@@ -20,13 +20,13 @@ void initialize(uint64_t deviceUUID,
 int32_t createContextFromAHB(
     AHardwareBuffer* in0, AHardwareBuffer* in1,
     const std::vector<AHardwareBuffer*>& outN,
-    VkExtent2D extent, VkFormat format);
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent = {0, 0});
 #endif
 
 int32_t createContextFromImages(
     VkImage in0, VkImage in1,
     const std::vector<VkImage>& outN,
-    VkExtent2D extent, VkFormat format);
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent = {0, 0});
 
 void presentContext(int32_t id, int inSem, const std::vector<int>& outSem);
 
@@ -46,7 +46,7 @@ void waitIdle();
 #if defined(__linux__) && !defined(__ANDROID__)
 int32_t createContextFromFd(int in0Fd, int in1Fd,
     const std::vector<int>& outFds,
-    VkExtent2D extent, VkFormat format);
+    VkExtent2D extent, VkFormat format, VkExtent2D outExtent = {0, 0});
 
 bool importTimelineSemaphore(int syncFd);
 
