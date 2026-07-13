@@ -101,6 +101,8 @@ static VkDeviceSize g_vkStagingSize = 0;
 static std::atomic<bool> g_vk_gen_ready{false};
 static int g_vkW = 0;
 static int g_vkH = 0;
+static int g_panelW = 0;
+static int g_panelH = 0;
 static VkFormat g_vkFmt = VK_FORMAT_UNDEFINED;
 
 static bool g_ahbImportAvailable = false;
@@ -1059,6 +1061,55 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
         LOG("[VkReinject] preTransform=0x%x -> bufTransform=%d", static_cast<int>(pt), bt);
     }
 
+    {
+        uint32_t inW = ci->imageExtent.width;
+        uint32_t inH = ci->imageExtent.height;
+        g_panelW = 0;
+        g_panelH = 0;
+
+        ANativeWindow* win = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_scMu);
+            auto it = g_surfaceWindowMap.find(ci->surface);
+            if (it != g_surfaceWindowMap.end()) win = it->second;
+        }
+        int wnW = win ? ANativeWindow_getWidth(win) : 0;
+        int wnH = win ? ANativeWindow_getHeight(win) : 0;
+
+        auto getSurfCaps = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+            resolve_instance(g_vkInstance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+        VkSurfaceCapabilitiesKHR caps{};
+        bool capsOk = (getSurfCaps && getSurfCaps(g_vkPhys, ci->surface, &caps) == VK_SUCCESS);
+
+        LOG("[VkReinject] panelprobe win=%dx%d capsOk=%d cur=%ux%u max=%ux%u render=%ux%u",
+            wnW, wnH, capsOk ? 1 : 0,
+            capsOk ? caps.currentExtent.width : 0u, capsOk ? caps.currentExtent.height : 0u,
+            capsOk ? caps.maxImageExtent.width : 0u, capsOk ? caps.maxImageExtent.height : 0u,
+            inW, inH);
+
+        uint32_t pw = 0, ph = 0;
+        if (wnW > 0 && wnH > 0) {
+            pw = static_cast<uint32_t>(wnW);
+            ph = static_cast<uint32_t>(wnH);
+        } else if (capsOk) {
+            pw = caps.currentExtent.width;
+            ph = caps.currentExtent.height;
+            if (pw == 0xFFFFFFFF || ph == 0xFFFFFFFF || pw == 0 || ph == 0) {
+                pw = caps.maxImageExtent.width;
+                ph = caps.maxImageExtent.height;
+            }
+        }
+
+        if (pw != 0 && ph != 0 && pw != 0xFFFFFFFF && ph != 0xFFFFFFFF) {
+            if ((inW < inH) != (pw < ph)) { uint32_t t = pw; pw = ph; ph = t; }
+            if (pw > inW && ph > inH) {
+                g_panelW = static_cast<int>(pw);
+                g_panelH = static_cast<int>(ph);
+            }
+        }
+        LOG("[VkReinject] panel %dx%d (render %ux%u)", g_panelW, g_panelH, inW, inH);
+    }
+
     VkSwapchainCreateInfoKHR modCi = *ci;
     modCi.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     modCi.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -1493,25 +1544,32 @@ static void vk_capture_setup() {
     if (r != VK_SUCCESS) { LOG("[VkGen] bindBufferMemory failed %d", r); return; }
 
     if (!g_ahbIn0) {
+        bool upscale = (g_panelW > g_vkW && g_panelH > g_vkH);
+        int outW = upscale ? g_panelW : g_vkW;
+        int outH = upscale ? g_panelH : g_vkH;
         g_ahbIn0 = alloc_ahb(g_vkW, g_vkH);
         g_ahbIn1 = alloc_ahb(g_vkW, g_vkH);
-        g_ahbReal = alloc_ahb(g_vkW, g_vkH);
+        g_ahbReal = alloc_ahb(outW, outH);
         int numOut = g_cfgMultiplier - 1;
         for (int i = 0; i < numOut; ++i)
-            g_ahbOutN[i] = alloc_ahb(g_vkW, g_vkH);
+            g_ahbOutN[i] = alloc_ahb(outW, outH);
         if (numOut > 0) g_ahbOut = g_ahbOutN[0];
         if (!g_ahbIn0 || !g_ahbIn1 || !g_ahbReal || (numOut > 0 && !g_ahbOut)) { LOG("[VkGen] ahb alloc failed"); return; }
     }
 
     int numOut = g_cfgMultiplier - 1;
     if (numOut > 0) {
+        bool upscale = (g_panelW > g_vkW && g_panelH > g_vkH);
+        int outW = upscale ? g_panelW : g_vkW;
+        int outH = upscale ? g_panelH : g_vkH;
         std::vector<AHardwareBuffer*> outVec(numOut);
         for (int i = 0; i < numOut; ++i)
             outVec[i] = g_ahbOutN[i];
 
         g_ctx = seifg::createContextFromAHB(g_ahbIn0, g_ahbIn1, outVec,
                                             VkExtent2D{extent.width, extent.height},
-                                            VK_FORMAT_R8G8B8A8_UNORM);
+                                            VK_FORMAT_R8G8B8A8_UNORM,
+                                            VkExtent2D{static_cast<uint32_t>(outW), static_cast<uint32_t>(outH)});
     }
 
     if (g_triggerPath[0] == '\0') {
@@ -1613,12 +1671,13 @@ static void framegen_thread_loop() {
                 auto realEndCmd = reinterpret_cast<PFN_vkEndCommandBuffer>(resolve_real(g_vkDevice, "vkEndCommandBuffer"));
                 auto realCmdBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(resolve_real(g_vkDevice, "vkCmdPipelineBarrier"));
                 auto realCmdCopy = reinterpret_cast<PFN_vkCmdCopyImage>(resolve_real(g_vkDevice, "vkCmdCopyImage"));
+                auto realCmdBlit = reinterpret_cast<PFN_vkCmdBlitImage>(resolve_real(g_vkDevice, "vkCmdBlitImage"));
                 auto realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(resolve_real(g_vkDevice, "vkQueueSubmit"));
                 auto realWaitFences = reinterpret_cast<PFN_vkWaitForFences>(resolve_real(g_vkDevice, "vkWaitForFences"));
                 auto realResetFences = reinterpret_cast<PFN_vkResetFences>(resolve_real(g_vkDevice, "vkResetFences"));
 
                 if (realResetCmd && realBeginCmd && realEndCmd && realCmdBarrier && realCmdCopy &&
-                    realSubmit && realWaitFences && realResetFences) {
+                    realCmdBlit && realSubmit && realWaitFences && realResetFences) {
                     realResetCmd(g_gpuSnapCmd, 0);
                     VkCommandBufferBeginInfo bi{};
                     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1649,12 +1708,26 @@ static void framegen_thread_loop() {
                     realCmdBarrier(g_gpuSnapCmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, bars);
 
-                    VkImageCopy region{};
-                    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    region.extent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
-                    realCmdCopy(g_gpuSnapCmd, g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                g_ahbRealImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                    int rw = (g_panelW > g_vkW && g_panelH > g_vkH) ? g_panelW : g_vkW;
+                    int rh = (g_panelW > g_vkW && g_panelH > g_vkH) ? g_panelH : g_vkH;
+                    if (rw != g_vkW || rh != g_vkH) {
+                        VkImageBlit blit{};
+                        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        blit.srcOffsets[0] = {0, 0, 0};
+                        blit.srcOffsets[1] = {static_cast<int32_t>(g_vkW), static_cast<int32_t>(g_vkH), 1};
+                        blit.dstOffsets[0] = {0, 0, 0};
+                        blit.dstOffsets[1] = {static_cast<int32_t>(rw), static_cast<int32_t>(rh), 1};
+                        realCmdBlit(g_gpuSnapCmd, g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    g_ahbRealImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                    } else {
+                        VkImageCopy region{};
+                        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        region.extent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH), 1};
+                        realCmdCopy(g_gpuSnapCmd, g_ahbIn1Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    g_ahbRealImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                    }
 
                     realEndCmd(g_gpuSnapCmd);
 
@@ -1684,20 +1757,22 @@ static void framegen_thread_loop() {
                 AHardwareBuffer_Desc dSrc{}, dDst{};
                 AHardwareBuffer_describe(g_ahbIn1, &dSrc);
                 AHardwareBuffer_describe(g_ahbReal, &dDst);
-                void* src = nullptr;
-                void* dst = nullptr;
-                AHardwareBuffer_lock(g_ahbIn1, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &src);
-                AHardwareBuffer_lock(g_ahbReal, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &dst);
-                if (src && dst) {
-                    uint32_t rowBytes = static_cast<uint32_t>(g_vkW) * 4;
-                    for (int y = 0; y < g_vkH; ++y) {
-                        memcpy(static_cast<uint8_t*>(dst) + static_cast<size_t>(y) * dDst.stride * 4,
-                               static_cast<uint8_t*>(src) + static_cast<size_t>(y) * dSrc.stride * 4,
-                               rowBytes);
+                if (dSrc.width == dDst.width && dSrc.height == dDst.height) {
+                    void* src = nullptr;
+                    void* dst = nullptr;
+                    AHardwareBuffer_lock(g_ahbIn1, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &src);
+                    AHardwareBuffer_lock(g_ahbReal, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &dst);
+                    if (src && dst) {
+                        uint32_t rowBytes = static_cast<uint32_t>(g_vkW) * 4;
+                        for (int y = 0; y < g_vkH; ++y) {
+                            memcpy(static_cast<uint8_t*>(dst) + static_cast<size_t>(y) * dDst.stride * 4,
+                                   static_cast<uint8_t*>(src) + static_cast<size_t>(y) * dSrc.stride * 4,
+                                   rowBytes);
+                        }
                     }
+                    AHardwareBuffer_unlock(g_ahbIn1, nullptr);
+                    AHardwareBuffer_unlock(g_ahbReal, nullptr);
                 }
-                AHardwareBuffer_unlock(g_ahbIn1, nullptr);
-                AHardwareBuffer_unlock(g_ahbReal, nullptr);
             }
 
             int64_t tSnapEnd = nowNsCapture();
