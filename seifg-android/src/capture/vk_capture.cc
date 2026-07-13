@@ -230,6 +230,8 @@ static PFN_vkAcquireNextImageKHR g_real_acquire = nullptr;
 static PFN_vkAcquireNextImage2KHR g_real_acquire2 = nullptr;
 static PFN_vkCreateAndroidSurfaceKHR g_real_create_android_surface = nullptr;
 static PFN_vkDestroySurfaceKHR g_real_destroy_surface = nullptr;
+static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR g_real_get_surf_caps = nullptr;
+static PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR g_real_get_surf_caps2 = nullptr;
 
 static VkResult VKAPI_CALL hooked_CreateDevice(
     VkPhysicalDevice phys,
@@ -270,6 +272,14 @@ static void VKAPI_CALL hooked_DestroySurfaceKHR(
     VkInstance instance,
     VkSurfaceKHR surface,
     const VkAllocationCallbacks* pAllocator);
+static VkResult VKAPI_CALL hooked_GetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice phys,
+    VkSurfaceKHR surface,
+    VkSurfaceCapabilitiesKHR* pCaps);
+static VkResult VKAPI_CALL hooked_GetPhysicalDeviceSurfaceCapabilities2KHR(
+    VkPhysicalDevice phys,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pInfo,
+    VkSurfaceCapabilities2KHR* pCaps);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstance instance, const char* pName);
 
@@ -729,6 +739,61 @@ static void VKAPI_CALL hooked_DestroySurfaceKHR(
         g_real_destroy_surface(instance, surface, pAllocator);
 }
 
+static float read_force_render_scale() {
+    char pkg[256] = {0};
+    FILE* cf = fopen("/proc/self/cmdline", "r");
+    if (!cf) return 0.0f;
+    size_t rd = fread(pkg, 1, sizeof(pkg) - 1, cf);
+    (void)rd;
+    fclose(cf);
+    char path[512];
+    snprintf(path, sizeof(path), "/sdcard/Android/data/%s/files/seifg_render_scale", pkg);
+    FILE* f = fopen(path, "r");
+    if (!f) return 0.0f;
+    float s = 0.0f;
+    fscanf(f, "%f", &s);
+    fclose(f);
+    if (s > 0.0f && s < 1.0f) return s;
+    return 0.0f;
+}
+
+static void apply_force_render_scale(VkSurfaceCapabilitiesKHR* caps) {
+    float s = read_force_render_scale();
+    if (s <= 0.0f) return;
+    if (caps->currentExtent.width == 0xFFFFFFFF || caps->currentExtent.width == 0) return;
+    uint32_t fw = ((uint32_t)(caps->currentExtent.width * s)) & ~1u;
+    uint32_t fh = ((uint32_t)(caps->currentExtent.height * s)) & ~1u;
+    if (fw < 256 || fh < 256) return;
+    uint32_t lo = fw < fh ? fw : fh;
+    uint32_t hi = fw < fh ? fh : fw;
+    fw = lo;
+    fh = hi;
+    caps->currentExtent = {fw, fh};
+    caps->minImageExtent = {fw, fh};
+    caps->maxImageExtent = {fw, fh};
+    LOG("[VkReinject] force render scale %.3f -> %ux%u", (double)s, fw, fh);
+}
+
+static VkResult VKAPI_CALL hooked_GetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice phys,
+    VkSurfaceKHR surface,
+    VkSurfaceCapabilitiesKHR* pCaps) {
+    if (!g_real_get_surf_caps) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = g_real_get_surf_caps(phys, surface, pCaps);
+    if (r == VK_SUCCESS) apply_force_render_scale(pCaps);
+    return r;
+}
+
+static VkResult VKAPI_CALL hooked_GetPhysicalDeviceSurfaceCapabilities2KHR(
+    VkPhysicalDevice phys,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pInfo,
+    VkSurfaceCapabilities2KHR* pCaps) {
+    if (!g_real_get_surf_caps2) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = g_real_get_surf_caps2(phys, pInfo, pCaps);
+    if (r == VK_SUCCESS) apply_force_render_scale(&pCaps->surfaceCapabilities);
+    return r;
+}
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
     if (strcmp(pName, "vkQueuePresentKHR") == 0) {
@@ -816,6 +881,16 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL my_GetInstanceProcAddr(VkInstanc
         if (!g_real_destroy_surface && g_real_gipa)
             g_real_destroy_surface = reinterpret_cast<PFN_vkDestroySurfaceKHR>(g_real_gipa(instance, pName));
         return reinterpret_cast<PFN_vkVoidFunction>(hooked_DestroySurfaceKHR);
+    }
+    if (strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0) {
+        if (!g_real_get_surf_caps && g_real_gipa)
+            g_real_get_surf_caps = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    }
+    if (strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilities2KHR") == 0) {
+        if (!g_real_get_surf_caps2 && g_real_gipa)
+            g_real_get_surf_caps2 = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR>(g_real_gipa(instance, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(hooked_GetPhysicalDeviceSurfaceCapabilities2KHR);
     }
     return g_real_gipa ? g_real_gipa(instance, pName) : nullptr;
 }
