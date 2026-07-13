@@ -88,6 +88,10 @@ static VkPhysicalDevice g_vkPhys = VK_NULL_HANDLE;
 static VkDevice g_vkDevice = VK_NULL_HANDLE;
 static VkQueue g_vkQueue = VK_NULL_HANDLE;
 static uint32_t g_vkFamily = 0;
+static bool g_vkQueueDedicated = false;
+static std::mutex g_vkQueueMutex;
+static std::atomic<bool> g_fgWedged{false};
+static constexpr int64_t kSeifgFenceTimeoutNs = 2'000'000'000LL;
 static VkCommandPool g_vkPool = VK_NULL_HANDLE;
 static VkCommandBuffer g_vkCmd = VK_NULL_HANDLE;
 static VkFence g_vkFence = VK_NULL_HANDLE;
@@ -230,6 +234,7 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
     const VkDeviceCreateInfo* ci,
     const VkAllocationCallbacks* a,
     VkDevice* pDev);
+static void vk_capture_reset_for_resize();
 static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     VkDevice device,
     const VkSwapchainCreateInfoKHR* ci,
@@ -875,6 +880,39 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
     std::vector<const char*> allExts;
     VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcrFeature{};
 
+    std::vector<VkDeviceQueueCreateInfo> modQueues;
+    std::vector<float> ourPriorities;
+    uint32_t dedicatedQueueIndex = 0;
+    bool wantDedicatedQueue = false;
+    if (ci->queueCreateInfoCount > 0 && ci->pQueueCreateInfos) {
+        uint32_t fam = ci->pQueueCreateInfos[0].queueFamilyIndex;
+        uint32_t famQueueCount = 0;
+        auto realQfp = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+            resolve_instance(g_vkInstance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+        if (realQfp) {
+            uint32_t qfCount = 0;
+            realQfp(phys, &qfCount, nullptr);
+            std::vector<VkQueueFamilyProperties> qfp(qfCount);
+            realQfp(phys, &qfCount, qfp.data());
+            if (fam < qfCount) famQueueCount = qfp[fam].queueCount;
+        }
+        uint32_t origCount = ci->pQueueCreateInfos[0].queueCount;
+        if (famQueueCount > origCount) {
+            modQueues.assign(ci->pQueueCreateInfos, ci->pQueueCreateInfos + ci->queueCreateInfoCount);
+            ourPriorities.assign(origCount + 1, 1.0f);
+            if (ci->pQueueCreateInfos[0].pQueuePriorities) {
+                for (uint32_t i = 0; i < origCount; ++i)
+                    ourPriorities[i] = ci->pQueueCreateInfos[0].pQueuePriorities[i];
+            }
+            modQueues[0].queueCount = origCount + 1;
+            modQueues[0].pQueuePriorities = ourPriorities.data();
+            modCi.pQueueCreateInfos = modQueues.data();
+            modCi.queueCreateInfoCount = static_cast<uint32_t>(modQueues.size());
+            dedicatedQueueIndex = origCount;
+            wantDedicatedQueue = true;
+        }
+    }
+
     if (allSupported && !extraExts.empty()) {
         allExts.reserve(ci->enabledExtensionCount + extraExts.size());
         for (uint32_t i = 0; i < ci->enabledExtensionCount; ++i)
@@ -889,7 +927,7 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
         modCi.pNext = &ycbcrFeature;
     }
 
-    VkResult result = g_real_create_device(phys, allSupported ? &modCi : ci, a, pDev);
+    VkResult result = g_real_create_device(phys, &modCi, a, pDev);
     if (result == VK_SUCCESS && pDev) {
         g_vkPhys = phys;
         g_vkDevice = *pDev;
@@ -898,8 +936,19 @@ static VkResult VKAPI_CALL hooked_CreateDevice(
         }
 
         auto realGetQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(resolve_real(*pDev, "vkGetDeviceQueue"));
-        if (realGetQueue) realGetQueue(*pDev, g_vkFamily, 0, &g_vkQueue);
-        else vkGetDeviceQueue(*pDev, g_vkFamily, 0, &g_vkQueue);
+        auto getQueueAt = [&](uint32_t idx, VkQueue* out) {
+            *out = VK_NULL_HANDLE;
+            if (realGetQueue) realGetQueue(*pDev, g_vkFamily, idx, out);
+            else vkGetDeviceQueue(*pDev, g_vkFamily, idx, out);
+        };
+        if (wantDedicatedQueue) {
+            getQueueAt(dedicatedQueueIndex, &g_vkQueue);
+            g_vkQueueDedicated = (g_vkQueue != VK_NULL_HANDLE);
+        }
+        if (!g_vkQueueDedicated) getQueueAt(0, &g_vkQueue);
+        LOG("[VkGen] using %s queue (family=%u idx=%u)",
+            g_vkQueueDedicated ? "dedicated" : "shared",
+            g_vkFamily, g_vkQueueDedicated ? dedicatedQueueIndex : 0);
 
         if (allSupported) {
             g_vkGetAhbProps = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
@@ -987,6 +1036,14 @@ static VkResult VKAPI_CALL hooked_CreateSwapchainKHR(
     }
 
     LOG("[VkReinject] virtualization enabled, creating real swapchain with FIFO");
+
+    if (g_vk_gen_ready.load() &&
+        (g_vkW != static_cast<int>(ci->imageExtent.width) ||
+         g_vkH != static_cast<int>(ci->imageExtent.height))) {
+        LOG("[VkReinject] extent changed %dx%d -> %ux%u, resetting capture pipeline",
+            g_vkW, g_vkH, ci->imageExtent.width, ci->imageExtent.height);
+        vk_capture_reset_for_resize();
+    }
 
     {
         VkSurfaceTransformFlagBitsKHR pt = ci->preTransform;
@@ -1256,7 +1313,10 @@ static bool vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
             submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submit.commandBufferCount = 1;
             submit.pCommandBuffers = &g_gpuCopyCmd;
-            realSubmit(g_vkQueue, 1, &submit, g_gpuCopyFence);
+            {
+                std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+                realSubmit(g_vkQueue, 1, &submit, g_gpuCopyFence);
+            }
             realWaitFences(g_vkDevice, 1, &g_gpuCopyFence, VK_TRUE, UINT64_MAX);
             realResetFences(g_vkDevice, 1, &g_gpuCopyFence);
         }
@@ -1323,7 +1383,10 @@ static bool vk_virtualized_capture(VkImage virtImg, const SwapchainInfo& scInfo)
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &g_vkCmd;
-        vkQueueSubmit(g_vkQueue, 1, &submit, g_vkFence);
+        {
+            std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+            vkQueueSubmit(g_vkQueue, 1, &submit, g_vkFence);
+        }
         vkWaitForFences(g_vkDevice, 1, &g_vkFence, VK_TRUE, UINT64_MAX);
         vkResetFences(g_vkDevice, 1, &g_vkFence);
 
@@ -1357,7 +1420,10 @@ static void vk_capture_setup() {
 
     VkExtent2D extent{};
     VkFormat format = VK_FORMAT_UNDEFINED;
-    {
+    if (g_vkW > 0 && g_vkH > 0) {
+        extent = {static_cast<uint32_t>(g_vkW), static_cast<uint32_t>(g_vkH)};
+        format = (g_vkFmt != VK_FORMAT_UNDEFINED) ? g_vkFmt : VK_FORMAT_R8G8B8A8_UNORM;
+    } else {
         std::lock_guard<std::mutex> lock(g_mu);
         if (g_swapchains.empty()) return;
         auto& info = g_swapchains.begin()->second;
@@ -1596,9 +1662,19 @@ static void framegen_thread_loop() {
                     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                     si.commandBufferCount = 1;
                     si.pCommandBuffers = &g_gpuSnapCmd;
-                    realSubmit(g_vkQueue, 1, &si, g_gpuSnapFence);
-                    realWaitFences(g_vkDevice, 1, &g_gpuSnapFence, VK_TRUE, UINT64_MAX);
-                    realResetFences(g_vkDevice, 1, &g_gpuSnapFence);
+                    {
+                        std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+                        realSubmit(g_vkQueue, 1, &si, g_gpuSnapFence);
+                    }
+                    VkResult snapWait = realWaitFences(g_vkDevice, 1, &g_gpuSnapFence, VK_TRUE, kSeifgFenceTimeoutNs);
+                    if (snapWait == VK_SUCCESS) {
+                        realResetFences(g_vkDevice, 1, &g_gpuSnapFence);
+                    } else {
+                        ERROR("[FgThread] snap fence wait failed %d, queue wedged; stopping framegen", snapWait);
+                        g_fgWedged.store(true);
+                        g_fgRunning.store(false, std::memory_order_relaxed);
+                        break;
+                    }
                 } else {
                     snapGpu = false;
                 }
@@ -1709,6 +1785,68 @@ static void stop_framegen_thread() {
     if (g_fgThread.joinable()) g_fgThread.join();
 }
 
+static void vk_capture_reset_for_resize() {
+    stop_framegen_thread();
+
+    if (g_seifg_inited.load()) seifg::waitIdle();
+
+    std::lock_guard<std::mutex> blk(g_fgBufMutex);
+
+    bool wedged = g_fgWedged.exchange(false);
+
+    if (g_ctx >= 0) { seifg::deleteContext(g_ctx); g_ctx = -1; }
+
+    if (wedged) {
+        LOG("[VkReinject] queue wedged; leaking size-dependent resources to avoid invalid free");
+        g_ahbIn0Img = g_ahbIn1Img = g_ahbRealImg = VK_NULL_HANDLE;
+        g_ahbIn0Mem = g_ahbIn1Mem = g_ahbRealMem = VK_NULL_HANDLE;
+        for (int i = 0; i < kMaxOutputs; ++i) { g_ahbOutImg[i] = VK_NULL_HANDLE; g_ahbOutMem[i] = VK_NULL_HANDLE; }
+        g_ahbIn0 = g_ahbIn1 = g_ahbReal = nullptr;
+        for (int i = 0; i < kMaxOutputs; ++i) g_ahbOutN[i] = nullptr;
+        g_vkStaging = VK_NULL_HANDLE;
+        g_vkStagingMem = VK_NULL_HANDLE;
+        g_vkFence = VK_NULL_HANDLE;
+        g_vkPool = VK_NULL_HANDLE;
+        g_vkCmd = VK_NULL_HANDLE;
+    } else {
+        auto realDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(resolve_real(g_vkDevice, "vkDestroyImage"));
+        auto realFreeMemory = reinterpret_cast<PFN_vkFreeMemory>(resolve_real(g_vkDevice, "vkFreeMemory"));
+        auto freeImportedImage = [&](VkImage& img, VkDeviceMemory& mem) {
+            if (img && realDestroyImage) realDestroyImage(g_vkDevice, img, nullptr);
+            if (mem && realFreeMemory) realFreeMemory(g_vkDevice, mem, nullptr);
+            img = VK_NULL_HANDLE;
+            mem = VK_NULL_HANDLE;
+        };
+        freeImportedImage(g_ahbIn0Img, g_ahbIn0Mem);
+        freeImportedImage(g_ahbIn1Img, g_ahbIn1Mem);
+        freeImportedImage(g_ahbRealImg, g_ahbRealMem);
+        for (int i = 0; i < kMaxOutputs; ++i)
+            freeImportedImage(g_ahbOutImg[i], g_ahbOutMem[i]);
+
+        auto releaseAhb = [](AHardwareBuffer*& b) { if (b) { AHardwareBuffer_release(b); b = nullptr; } };
+        releaseAhb(g_ahbIn0);
+        releaseAhb(g_ahbIn1);
+        releaseAhb(g_ahbReal);
+        for (int i = 0; i < kMaxOutputs; ++i)
+            releaseAhb(g_ahbOutN[i]);
+
+        if (g_vkStaging) { vkDestroyBuffer(g_vkDevice, g_vkStaging, nullptr); g_vkStaging = VK_NULL_HANDLE; }
+        if (g_vkStagingMem) { vkFreeMemory(g_vkDevice, g_vkStagingMem, nullptr); g_vkStagingMem = VK_NULL_HANDLE; }
+        if (g_vkFence) { vkDestroyFence(g_vkDevice, g_vkFence, nullptr); g_vkFence = VK_NULL_HANDLE; }
+        if (g_vkPool) { vkDestroyCommandPool(g_vkDevice, g_vkPool, nullptr); g_vkPool = VK_NULL_HANDLE; g_vkCmd = VK_NULL_HANDLE; }
+    }
+
+    g_ahbOut = nullptr;
+    g_ahbImagesImported = false;
+
+    g_captureCount.store(0);
+    g_vk_gen_ready.store(false);
+    g_vkW = 0;
+    g_vkH = 0;
+
+    LOG("[VkReinject] capture pipeline reset for resize");
+}
+
 static void vk_capture_present(const VkPresentInfoKHR* pi) {
     static std::atomic<uint64_t> vkFrame{0};
     uint64_t n = vkFrame.fetch_add(1);
@@ -1789,7 +1927,11 @@ static void vk_capture_present(const VkPresentInfoKHR* pi) {
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &g_vkCmd;
-    VkResult r = vkQueueSubmit(g_vkQueue, 1, &submit, g_vkFence);
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+        r = vkQueueSubmit(g_vkQueue, 1, &submit, g_vkFence);
+    }
     if (r != VK_SUCCESS) { LOG("[VkGen] queueSubmit failed %d", r); return; }
 
     vkWaitForFences(g_vkDevice, 1, &g_vkFence, VK_TRUE, UINT64_MAX);
@@ -1935,7 +2077,10 @@ static VkResult VKAPI_CALL hooked_AcquireNextImageKHR(
             submit.signalSemaphoreCount = 1;
             submit.pSignalSemaphores = &semaphore;
         }
-        vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+        {
+            std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+            vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+        }
     }
 
     return VK_SUCCESS;
@@ -1982,7 +2127,10 @@ static VkResult VKAPI_CALL hooked_AcquireNextImage2KHR(
             submit.signalSemaphoreCount = 1;
             submit.pSignalSemaphores = &semaphore;
         }
-        vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+        {
+            std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+            vkQueueSubmit(g_vkQueue, 1, &submit, fence);
+        }
     }
 
     return VK_SUCCESS;
@@ -2151,7 +2299,10 @@ static VkResult VKAPI_CALL hooked_QueuePresentKHR(
         submit.pCommandBuffers = &scInfo.blitCmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &scInfo.blitDoneSem;
-        vkQueueSubmit(g_vkQueue, 1, &submit, scInfo.blitFence);
+        {
+            std::lock_guard<std::mutex> qlk(g_vkQueueMutex);
+            vkQueueSubmit(g_vkQueue, 1, &submit, scInfo.blitFence);
+        }
 
         VkPresentInfoKHR realPi{};
         realPi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
