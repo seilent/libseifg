@@ -67,32 +67,6 @@ class Plugin:
     async def get_status(self):
         return {"installed": _is_installed()}
 
-    async def get_display_hz(self):
-        import subprocess
-        import re
-        import pwd
-        hz = 60
-        user = DECKY_USER or "deck"
-        try:
-            uid = pwd.getpwnam(user).pw_uid
-        except Exception:
-            uid = 1000
-        for cmd in (
-            ["runuser", "-u", user, "--", "env", "XDG_RUNTIME_DIR=/run/user/%d" % uid, "gamescopectl"],
-            ["gamescopectl"],
-        ):
-            try:
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
-                for line in out.splitlines():
-                    if "ValidRefreshRates" in line:
-                        rates = [int(x) for x in re.findall(r"\d+", line)]
-                        if rates:
-                            hz = max(rates)
-                            return {"hz": hz}
-            except Exception:
-                continue
-        return {"hz": hz}
-
     async def install(self):
         plugin_dir = decky.DECKY_PLUGIN_DIR
         bundled_so = os.path.join(plugin_dir, "bin", "libseifg-vk.so")
